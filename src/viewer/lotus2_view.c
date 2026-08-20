@@ -22,7 +22,7 @@
 #include "amiga.h"
 #include "whdload.h"
 #include "pad.h"
-#include "m68k.h"
+#include "cpu.h"
 
 #define A3 0x208000u
 
@@ -1224,7 +1224,7 @@ int main(int argc, char **argv)
         int seg = course_here();
         snprintf(status, sizeof status,
                  "frame %ld   pc $%06x   seg %d/%d   blits %ld%s",
-                 swiv_frame_no, m68k_get_reg(NULL, M68K_REG_PC), seg,
+                 swiv_frame_no, cpu_get_reg(CPU_REG_PC), seg,
                  COURSE_SEGMENTS, swiv_blit_count, paused ? "   PAUSED" : "");
         ui_text(status, 8, by + 4, 16, RAYWHITE);
 

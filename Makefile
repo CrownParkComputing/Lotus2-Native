@@ -76,14 +76,27 @@ build/lotus2_native: src/engine/lotus2_native.c $(ENGINE) $(ENGINE_H)
 	$(CC) -O2 -std=c11 -Wall -Wextra -Isrc/engine -o $@ \
 		src/engine/lotus2_native.c $(ENGINE)
 
+# PLAYABLE NATIVE BUILD: the viewer driven by recompiled C, no emulator.
+# Same window, same pad handling; the CPU behind it is compiled game code.
+build/lotus2_play: src/viewer/lotus2_view.c $(HOST) $(HOST_H) \
+		src/host/pad.c src/host/cpu_recomp.c src/recomp/m68krt.h \
+		$(RECOMP_SRC)
+	mkdir -p build
+	$(CC) $(CFLAGS_RECOMP) -Isrc/engine -o $@ \
+		src/viewer/lotus2_view.c $(HOST) src/host/pad.c \
+		src/host/cpu_recomp.c $(RECOMP_SRC) $(RAYLIB_FLAGS)
+
+play: build/lotus2_play
+	./build/lotus2_play --live --dir $(INSTALL)
+
 # Live viewer: runs the game through the oracle host in a window, with the
 # TRACK / GEOMETRY / DISPLAY debug panels over the live guest state.
-build/lotus2_view: src/viewer/lotus2_view.c $(HOST) $(HOST_H) $(MUSASHI) \
-		src/host/pad.c
+build/lotus2_view: src/viewer/lotus2_view.c $(HOST) $(HOST_H) \
+		src/host/cpu_musashi.c $(MUSASHI) src/host/pad.c
 	mkdir -p build
 	$(CC) $(CFLAGS_NATIVE) -Isrc/engine -o $@ \
-		src/viewer/lotus2_view.c $(HOST) src/host/pad.c $(MUSASHI) \
-		$(RAYLIB_FLAGS)
+		src/viewer/lotus2_view.c $(HOST) src/host/pad.c \
+		src/host/cpu_musashi.c $(MUSASHI) $(RAYLIB_FLAGS)
 
 # Drive the native engine: no emulator, only ported C, from a race
 # snapshot.  Scenery is absent because $21508a is not ported yet.
@@ -212,6 +225,13 @@ $(DECODE_IMAGE): tools/decode_image.py re/pipeline/combined.bin \
 # different number of cycles taken than not taken and a per-pc mean rounds
 # that away -- worth 0.6% drift per frame, which is a whole frame every
 # few thousand.
+# The offline disassembler used by the recompiler.  Musashi here is a
+# BUILD TOOL, not part of the game: it decodes the image, it does not run it.
+build/dasm: tools/dasm.c $(MUSASHI_DIR)/m68kdasm.c
+	mkdir -p build
+	$(CC) -O2 -std=c11 -I$(MUSASHI_DIR) -o $@ tools/dasm.c \
+		$(MUSASHI_DIR)/m68kdasm.c
+
 re/pipeline/cycles.txt: build/lotus2
 	SWIV_CYCLES=$@ ./build/lotus2 --dir $(INSTALL) --frames 9000 \
 		--fire-from 2100 --fire-period 100 >/dev/null 2>&1
@@ -220,6 +240,7 @@ $(RECOMP_SRC): tools/m68k2c.py re/pipeline/pcset_race.txt build/dasm \
 		re/pipeline/cycles.txt $(DECODE_IMAGE)
 	python3 tools/m68k2c.py --image $(DECODE_IMAGE) \
 		--pcset re/pipeline/pcset_race.txt --range 200-390000 \
+		--exhaustive \
 		--descend --out $@
 
 # Decode integrity: every pc the 68000 actually fetched from must be an
@@ -261,4 +282,4 @@ test: selftest boot-test
 clean:
 	rm -rf build
 
-.PHONY: no-musashi decode-check recomp recomp-gate statelog trace pcset drive all native boot-test selftest oracle test clean gate-capture road-capture render-gate view view-race track course
+.PHONY: play no-musashi decode-check recomp recomp-gate statelog trace pcset drive all native boot-test selftest oracle test clean gate-capture road-capture render-gate view view-race track course

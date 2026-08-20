@@ -439,6 +439,7 @@ def emit(ins):
         bsz = 4 if lo[1].kind == 'd' else 1
         bit = ('%d' % lo[0].v) if lo[0].kind == 'imm' else 'm->d[%d]' % lo[0].r
         d = read_op(lo[1], bsz, out, 'd')
+        if d is None: raise Unsupported(m)
         out.append('uint32_t bn = (%s) %% %d;' % (bit, bsz * 8))
         out.append('uint32_t dv = %s;' % d)
         out.append('m->z = ((dv >> bn) & 1) == 0;')
@@ -514,6 +515,8 @@ def emit(ins):
 
 def emit_case(ins, known):
     """Full case body including the pc update / control flow."""
+    if ins.addr & 1:
+        return ['m->fault = "odd pc"; m->halted = 1; break;']
     m, o = ins.mnem, ins.ops
     nxt = 'm->pc = 0x%x; break;' % ins.next
     body = []
@@ -575,65 +578,51 @@ def emit_case(ins, known):
     body.append(nxt)
     return body
 
-def disassemble_at(image, pcs, window=0x800):
-    """Decode starting FROM each executed pc, restarting whenever a linear
-    sweep drifts off one.
+def disassemble_at(image, pcs, window=None):
+    """Decode exactly one instruction at each given address.
 
-    A linear sweep treats jump tables and inline data as instructions and
-    silently comes back into phase a few bytes later, which produces code
-    that compiles and is wrong.  The oracle recorded every address the
-    68000 fetched from, so those addresses ARE the instruction boundaries:
-    sweep, and the moment the sweep fails to land on the next executed pc,
-    restart the sweep there.  Progress is guaranteed because the restart
-    address is always the first boundary of the new sweep.
+    Musashi's disassembler is asked for each address directly rather than
+    swept over a range, so boundaries are whatever the caller vouches for
+    -- and the caller only ever vouches for addresses the CPU really
+    fetched from, or that a verified instruction branches to.  A linear
+    sweep would instead impose its own phase, walk jump tables and inline
+    data as code, and silently come back into step a few bytes later.
+
+    Batched through one `dasm --at` process: the recompiler needs a decode
+    at every address the CPU could land on, and a process per address made
+    that unaffordable.
     """
-    todo = sorted(pcs)
-    found, i, guard = {}, 0, 0
-    while i < len(todo):
-        guard += 1
-        if guard > 4 * len(todo) + 1000:
-            raise SystemExit('decode did not converge')
-        start = todo[i]
-        text = subprocess.run(['./build/dasm', image, hex(start),
-                               hex(start + window)],
-                              capture_output=True, text=True).stdout
-        block, order = {}, []
-        for line in text.splitlines():
-            m = re.match(r'\$([0-9a-f]{6})', line)
-            if m:
-                a = int(m.group(1), 16)
-                block[a] = line.rstrip(); order.append(a)
-        order.sort()
-        nxt = {a: (order[k + 1] if k + 1 < len(order) else None)
-               for k, a in enumerate(order)}
-        limit = start + window - 32
-        progressed = False
-        while i < len(todo) and todo[i] in block and todo[i] < limit \
-                and nxt[todo[i]] is not None:
-            found[todo[i]] = (block[todo[i]], nxt[todo[i]] - todo[i])
-            i += 1; progressed = True
-        if not progressed and i < len(todo) and todo[i] in block \
-                and nxt[todo[i]] is None:
-            # single instruction at the very end of the window: widen once
-            text2 = subprocess.run(['./build/dasm', image, hex(todo[i]),
-                                    hex(todo[i] + 64)],
-                                   capture_output=True, text=True).stdout
-            ls = [l for l in text2.splitlines() if l.startswith('$')]
-            if len(ls) >= 2:
-                a0 = int(ls[0][1:7], 16); a1 = int(ls[1][1:7], 16)
-                found[todo[i]] = (ls[0].rstrip(), a1 - a0)
-                i += 1
-            else:
-                raise SystemExit('cannot decode $%06x' % todo[i])
-    return found
+    pcs = [p for p in pcs if not (p & 1)]
+    if not pcs:
+        return {}
+    inp = '\n'.join('%x' % p for p in pcs)
+    out = subprocess.run(['./build/dasm', image, '--at'], input=inp,
+                         capture_output=True, text=True).stdout
+    res = {}
+    for line in out.splitlines():
+        m = re.match(r'\$([0-9a-f]{6}) (\d+) (.*)', line)
+        if not m:
+            continue
+        a, ln, text = int(m.group(1), 16), int(m.group(2)), m.group(3)
+        res[a] = ('$%06x  %s' % (a, text), ln)
+    return res
+
 
 COND = ('beq','bne','bcs','bcc','bmi','bpl','bvs','bvc','bhi','bls',
         'bge','blt','bgt','ble')
-BRANCHY = ('bra','bsr','jmp','jsr','beq','bne','bcs','bcc','bmi','bpl',
-           'bvs','bvc','bhi','bls','bge','blt','bgt','ble','dbra','dbf',
-           'dbeq','dbne','dbcs','dbcc','dbmi','dbpl','dbhi','dbls','dbge',
-           'dblt','dbgt','dble')
+BRANCHY = ('bra','bsr','jmp','jsr') + COND + tuple(
+    'db' + c for c in ('ra','f','eq','ne','cs','cc','mi','pl','hi','ls',
+                       'ge','lt','gt','le'))
 STOPS = ('rts','rte','rtr','jmp','bra')
+JT_INDEX = re.compile(r'^\(A([0-7]),D[0-7]\.w\)$')
+
+_IMG_CACHE = {}
+def read_word(path, off):
+    if path not in _IMG_CACHE:
+        _IMG_CACHE[path] = open(path, 'rb').read()
+    d = _IMG_CACHE[path]
+    return (d[off] << 8) | d[off + 1]
+
 
 def descend(image, seeds, ranges, decoded):
     """Extend the decode by recursive descent from known-good anchors.
@@ -641,50 +630,52 @@ def descend(image, seeds, ranges, decoded):
     The executed-pc set only covers paths one trace happened to take, so a
     build made from it halts the first time the game does something new --
     a different music pattern, an unvisited menu.  Every executed pc is a
-    verified instruction boundary, though, so they are safe seeds: decode
+    verified instruction boundary though, so they are safe seeds: decode
     forward from each, follow static branch and call targets, and stop at
     rts/rte and at anything that does not decode.  That reaches code the
     trace never ran WITHOUT the phase errors a linear sweep makes.
     """
     def in_range(a):
+        if a & 1:
+            return False      # a 68000 instruction is never at an odd address
         return any(lo <= a < hi for lo, hi in ranges)
-    work = [a for a in seeds if in_range(a)]
-    seen = set()
-    cache = {}
-    conflicts = []
-    added = 0
-    while work:
-        pc = work.pop()
-        if pc in seen or not in_range(pc):
-            continue
-        if pc in decoded:
-            text, length = decoded[pc]
-        elif pc in cache:
-            text, length = cache[pc]
-        else:
-            # Decode a window forward from this verified point and keep
-            # the whole sequential chain: every address in it is an
-            # instruction boundary GIVEN this anchor.  If another chain
-            # later disagrees about an address, that is a genuine
-            # ambiguity and is reported rather than silently resolved.
-            win = disassemble_at(image, [pc], window=0x200)
-            if pc not in win:
+
+    frontier = [a for a in seeds if in_range(a)]
+    seen, cache, added = set(), {}, 0
+    while frontier:
+        # decode the whole wave in one call: a process per address is what
+        # made this take minutes
+        todo = sorted({a for a in frontier
+                       if a not in seen and in_range(a)
+                       and a not in decoded and a not in cache})
+        if todo:
+            cache.update(disassemble_at(image, todo))
+        work, frontier = frontier, []
+        for pc in work:
+            if pc in seen or not in_range(pc):
                 continue
-            for k, v in win.items():
-                if k in cache and cache[k][0] != v[0]:
-                    conflicts.append(k)
-                cache[k] = v
-            text, length = cache[pc]
+            if pc in decoded:
+                text, length = decoded[pc]
+            elif pc in cache:
+                text, length = cache[pc]
+            else:
+                continue
+            _descend_one(pc, text, length, decoded, seen, frontier,
+                         in_range)
+            added += (1 if pc in decoded and pc in seen else 0)
+    return added
+
+
+def _descend_one(pc, text, length, decoded, seen, frontier, in_range):
         m = re.match(r'\$[0-9a-f]{6}\s+(\S+)\s*(.*)', text)
         if not m:
-            continue
+            return
         mnem = m.group(1).split('.')[0]
         if mnem == 'dc':                 # not an instruction: stop this path
-            continue
+            return
         seen.add(pc)
         if pc not in decoded:
             decoded[pc] = (text, length)
-            added += 1
         rest = m.group(2).split(';')[0]
         if mnem in BRANCHY:
             for tok in split_operands(rest):
@@ -692,15 +683,73 @@ def descend(image, seeds, ranges, decoded):
                 if t:
                     tgt = num(t.group(1)) & 0xffffff
                     if in_range(tgt) and tgt not in seen:
-                        work.append(tgt)
+                        frontier.append(tgt)
         if mnem not in STOPS:
-            work.append(pc + length)
-    if conflicts:
-        sys.stderr.write('m68k2c: %d addresses decoded two different ways '
-                         'by different chains (first $%06x) -- ambiguous, '
-                         'left to the anchored decode\n'
-                         % (len(conflicts), conflicts[0]))
-    return added
+            frontier.append(pc + length)
+
+
+def jump_tables(decoded, in_range, image):
+    """Find word-offset jump tables and return their targets.
+
+    The game dispatches its music commands (and other small state
+    machines) through
+
+        lea    table(PC), An
+        adda.w (An,Dm.w), An
+        jsr    (An)
+
+    which is a computed jump: recursive descent cannot follow it, so the
+    handlers it reaches exist only if the trace happened to run them --
+    which is what left the build halting in the music replay after about
+    98 seconds of attract mode.  The table is self-describing, though:
+    each entry is a word displacement from the table's own address.  Read
+    the entries out and use them as seeds, stopping at the first one whose
+    target does not decode, which also bounds the table's length.
+    """
+    order = sorted(decoded)
+    pos = {a: i for i, a in enumerate(order)}
+    targets, tables = set(), 0
+    for a in order:
+        text = decoded[a][0]
+        m = re.match(r'\$[0-9a-f]{6}\s+adda\.w\s+(\S+),\s*A([0-7])$',
+                     text.strip())
+        if not m:
+            continue
+        idx = JT_INDEX.match(m.group(1))
+        if not idx or idx.group(1) != m.group(2):
+            continue
+        reg = int(m.group(2))
+        i = pos[a]
+        if i + 1 >= len(order):
+            continue
+        if not re.search(r'(jsr|jmp)\s+\(A%d\)' % reg, decoded[order[i + 1]][0]):
+            continue
+        base = None
+        for k in range(i - 1, max(-1, i - 12), -1):
+            t = decoded[order[k]][0]
+            lm = re.match(r'\$[0-9a-f]{6}\s+lea\s+(\S+),\s*A%d' % reg, t.strip())
+            if lm:
+                res = re.search(r';\s*\(\$([0-9a-f]+)\)', t)
+                if res:
+                    base = int(res.group(1), 16)
+                else:
+                    am = ABS.match(lm.group(1))
+                    if am:
+                        base = num(am.group(1)) & 0xffffff
+                break
+        if base is None or not in_range(base):
+            continue
+        tables += 1
+        for e in range(64):
+            tgt = (base + read_word(image, base + e * 2)) & 0xffffff
+            if not in_range(tgt):
+                break
+            probe = disassemble_at(image, [tgt])
+            if tgt not in probe or probe[tgt][0].split()[1].startswith('dc'):
+                break
+            targets.add(tgt)
+    return targets, tables
+
 
 def main():
     ap = argparse.ArgumentParser()
@@ -712,6 +761,10 @@ def main():
                     help='measured per-pc cycle costs from the oracle '
                          '(SWIV_CYCLES); instructions the trace never ran '
                          'get a cost learned from the ones it did')
+    ap.add_argument('--exhaustive', action='store_true',
+                    help='also translate every even address inside the '
+                         'traced regions, so the CPU can never land on an '
+                         'untranslated pc there')
     ap.add_argument('--descend', action='store_true',
                     help='extend the decode by recursive descent from the '
                          'executed pcs, so untaken paths are translated too')
@@ -742,6 +795,49 @@ def main():
         n = descend(a.image, sorted(keep), ranges, decoded)
         sys.stderr.write('m68k2c: recursive descent added %d instructions '
                          'the trace never reached\n' % n)
+        def in_range(x):
+            return any(lo2 <= x < hi2 for lo2, hi2 in ranges)
+        for _round in range(4):
+            tgts, ntab = jump_tables(decoded, in_range, a.image)
+            fresh = [t for t in tgts if t not in decoded]
+            if not fresh:
+                break
+            n2 = descend(a.image, fresh, ranges, decoded)
+            sys.stderr.write('m68k2c: %d jump tables -> %d new entry points, '
+                             '%d more instructions\n'
+                             % (ntab, len(fresh), n2))
+    if a.exhaustive:
+        # Reachability analysis is never complete: indirect jumps, data
+        # driven dispatch and self-modifying tables all reach code that
+        # neither the trace nor static descent finds, and each gap shows
+        # up as the game halting minutes in.  Decoding EVERY even address
+        # in the regions the game actually uses removes the failure mode:
+        # addresses that hold data decode to something inert that is only
+        # ever reached if the CPU was already lost, and the odd-address
+        # and dc.w guards keep those cases honest.
+        spans, prev = [], None
+        for p in sorted(keep):
+            if prev is None or p - prev > 0x400:
+                spans.append([p, p + 2])
+            else:
+                spans[-1][1] = p + 2
+            prev = p
+        want = []
+        for slo, shi in spans:
+            for x in range(slo & ~1, (shi + 0x1000) & ~1, 2):
+                if x not in decoded and lo <= x < hi:
+                    want.append(x)
+        got = disassemble_at(a.image, want)
+        added = 0
+        for addr, (text, length) in got.items():
+            mn = text.split()[1] if len(text.split()) > 1 else ''
+            if mn.startswith('dc'):
+                continue
+            decoded[addr] = (text, length)
+            added += 1
+        sys.stderr.write('m68k2c: exhaustive pass added %d addresses '
+                         '(%d probed)\n' % (added, len(want)))
+
     lines = []
     for addr in sorted(decoded):
         lines.append(decoded[addr][0])
@@ -810,6 +906,9 @@ def main():
     cases, faults = [], 0
     for ins in insns:
         body = emit_case(ins, known)
+        if any('None' in b for b in body):
+            body = ['m->fault = "unlowered operand @ $%06x"; m->halted = 1; '
+                    'break;' % ins.addr]
         if any('m->fault =' in b and 'divide' not in b for b in body):
             faults += 1
         # each case gets its own block: the temporaries are per-instruction
