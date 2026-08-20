@@ -35,10 +35,12 @@ for spec in a.region:
     rng, path = spec.split('=')
     lo, hi = (int(x, 16) for x in rng.split('-'))
     src = open(path, 'rb').read()
-    if hi > len(src):
+    # a chip snapshot is indexed from $000000, an ExpMem one from $200000
+    base = 0 if lo < 0x80000 else 0x200000
+    if hi - base > len(src):
         raise SystemExit('%s is too small for $%06x-$%06x' % (path, lo, hi))
-    changed = sum(1 for i in range(lo, hi) if img[i] != src[i])
-    img[lo:hi] = src[lo:hi]
+    changed = sum(1 for i in range(lo, hi) if img[i] != src[i - base])
+    img[lo:hi] = src[lo - base:hi - base]
     print('$%06x-$%06x from %s (%d of %d bytes differed)'
           % (lo, hi, path, changed, hi - lo))
 open(a.out, 'wb').write(img)

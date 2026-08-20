@@ -56,11 +56,18 @@ build/lotus2: src/host/lotus2_run.c $(HOST) $(HOST_H) src/host/cpu_musashi.c $(M
 # Nothing from third_party/musashi is compiled or linked into it.
 CFLAGS_RECOMP = -O2 -std=c11 -Wall -Wextra -include src/host/amiga.h \
 	-Isrc/host -Isrc/recomp
+# The generated file is one switch with tens of thousands of cases; -O2
+# spends minutes on it for no measurable gain, so it is compiled apart at
+# -O1 and linked in.
+build/lotus2_recomp.o: $(RECOMP_SRC) src/recomp/m68krt.h
+	mkdir -p build
+	$(CC) -O1 -std=c11 -w -Isrc/recomp -c -o $@ $(RECOMP_SRC)
+
 build/lotus2_recomp: src/host/lotus2_run.c $(HOST) $(HOST_H) \
-		src/host/cpu_recomp.c src/recomp/m68krt.h $(RECOMP_SRC)
+		src/host/cpu_recomp.c src/recomp/m68krt.h build/lotus2_recomp.o
 	mkdir -p build
 	$(CC) $(CFLAGS_RECOMP) -o $@ src/host/lotus2_run.c $(HOST) \
-		src/host/cpu_recomp.c $(RECOMP_SRC) -lm
+		src/host/cpu_recomp.c build/lotus2_recomp.o -lm
 
 # Proof that no emulator is linked in: the native binary must contain no
 # Musashi symbols at all.
@@ -80,11 +87,11 @@ build/lotus2_native: src/engine/lotus2_native.c $(ENGINE) $(ENGINE_H)
 # Same window, same pad handling; the CPU behind it is compiled game code.
 build/lotus2_play: src/viewer/lotus2_view.c $(HOST) $(HOST_H) \
 		src/host/pad.c src/host/cpu_recomp.c src/recomp/m68krt.h \
-		$(RECOMP_SRC)
+		build/lotus2_recomp.o
 	mkdir -p build
 	$(CC) $(CFLAGS_RECOMP) -Isrc/engine -o $@ \
 		src/viewer/lotus2_view.c $(HOST) src/host/pad.c \
-		src/host/cpu_recomp.c $(RECOMP_SRC) $(RAYLIB_FLAGS)
+		src/host/cpu_recomp.c build/lotus2_recomp.o $(RAYLIB_FLAGS)
 
 play: build/lotus2_play
 	./build/lotus2_play --live --dir $(INSTALL)
@@ -215,10 +222,30 @@ re/pipeline/boot/chip_0723ba.bin: build/lotus2
 	rm -f re/pipeline/boot/snap_0_0723ba_fast.bin \
 	      re/pipeline/boot/snap_0_0723ba.regs
 
+# tools/image_coherence.py checks every traced region against a snapshot
+# taken at that region's first executed pc, and lists the ones that need an
+# overlay.  $204bf2-$2059fe was only 18.4% coherent -- ExpMem code loaded
+# for the race, long after combined.bin was dumped.  A buffer of zeros
+# disassembles as a run of `ori.b #$0,D0`, so the CPU walks through it
+# instead of faulting and the failure surfaces thousands of frames later.
+re/pipeline/boot/fast_204bf2.bin: build/lotus2
+	mkdir -p re/pipeline/boot
+	SWIV_SNAP_PCS=204bf2 SWIV_SNAP_FROM=0 SWIV_SNAP_MAX=1 \
+	SWIV_SNAP_PREFIX=re/pipeline/boot/rc_ \
+	./build/lotus2 --dir $(INSTALL) --frames 9000 \
+		--fire-from 2100 --fire-period 100 >/dev/null 2>&1
+	mv re/pipeline/boot/rc_0_204bf2_fast.bin $@
+	rm -f re/pipeline/boot/rc_0_204bf2_chip.bin \
+	      re/pipeline/boot/rc_0_204bf2.regs
+
 $(DECODE_IMAGE): tools/decode_image.py re/pipeline/combined.bin \
-		re/pipeline/boot/chip_0723ba.bin
+		re/pipeline/boot/chip_0723ba.bin re/pipeline/boot/fast_204bf2.bin
 	python3 tools/decode_image.py --base re/pipeline/combined.bin \
-		--region 723b0-72690=re/pipeline/boot/chip_0723ba.bin --out $@
+		--region 723b0-72690=re/pipeline/boot/chip_0723ba.bin \
+		--region 204bf2-205a1e=re/pipeline/boot/fast_204bf2.bin --out $@
+
+coherence: build/lotus2 $(DECODE_IMAGE)
+	python3 tools/image_coherence.py
 
 # Per-EDGE cycle costs measured from the oracle's own counter.  Keyed by
 # (pc -> next pc) rather than by pc, because a conditional branch costs a
@@ -250,10 +277,11 @@ $(RECOMP_SRC): tools/m68k2c.py re/pipeline/pcset_race.txt build/dasm \
 decode-check: build/dasm re/pipeline/pcset_race.txt $(DECODE_IMAGE)
 	python3 tools/decode_check.py
 
-build/recomp_verify: src/recomp/recomp_verify.c $(RECOMP_SRC) src/recomp/m68krt.h
+build/recomp_verify: src/recomp/recomp_verify.c build/lotus2_recomp.o \
+		src/recomp/m68krt.h
 	mkdir -p build
 	$(CC) -O1 -std=c11 -w -Isrc/recomp -o $@ \
-		src/recomp/recomp_verify.c $(RECOMP_SRC)
+		src/recomp/recomp_verify.c build/lotus2_recomp.o
 
 recomp: build/recomp_verify
 
@@ -282,4 +310,4 @@ test: selftest boot-test
 clean:
 	rm -rf build
 
-.PHONY: play no-musashi decode-check recomp recomp-gate statelog trace pcset drive all native boot-test selftest oracle test clean gate-capture road-capture render-gate view view-race track course
+.PHONY: coherence play no-musashi decode-check recomp recomp-gate statelog trace pcset drive all native boot-test selftest oracle test clean gate-capture road-capture render-gate view view-race track course

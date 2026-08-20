@@ -178,6 +178,38 @@ def read_op(op, sz, out, tag):
         return vname
     return None
 
+def rmw_read(op, sz, out, tag):
+    """Read a destination that is about to be written back.
+
+    A read-modify-write on (An)+ or -(An) adjusts the register ONCE, not
+    once for the read and again for the write: `add.l D2,(A2)+` reads at
+    A2, adds, writes back to the SAME address, and only then advances A2.
+    Lowering the read and the write independently increments twice and
+    puts the result four bytes past where the game expects it -- which
+    shows up as a handful of wrong bytes and, several thousand frames
+    later, a race that does not match.
+
+    Returns (ea_name, value_expr); pass ea_name to rmw_write.
+    """
+    if op.kind not in MEMKINDS:
+        return None, read_op(op, sz, out, tag)
+    if op.kind == 'pre':
+        out.append('m->a[%d] -= %d;' % (op.r, 2 if (op.r == 7 and sz == 1) else sz))
+    name = ea(op, out, tag)
+    if op.kind == 'pre':
+        out.append('%s = m->a[%d];' % (name, op.r))
+    vname = 'v_%s' % fresh(tag)
+    out.append('uint32_t %s = m68k_rd(m, %s, %d);' % (vname, name, sz))
+    return name, vname
+
+def rmw_write(op, sz, ea_name, expr, out, tag):
+    if ea_name is None:
+        return write_op(op, sz, expr, out, tag)
+    out.append('m68k_wr(m, %s, %d, %s);' % (ea_name, sz, expr))
+    if op.kind == 'post':
+        out.append('m->a[%d] += %d;' % (op.r, 2 if (op.r == 7 and sz == 1) else sz))
+    return True
+
 def write_op(op, sz, expr, out, tag):
     if op.kind == 'd':   out.append('m68k_setd(m, %d, %d, %s);' % (op.r, sz, expr)); return True
     if op.kind == 'a':   out.append('m68k_seta(m, %d, %d, %s);' % (op.r, sz, expr)); return True
@@ -284,21 +316,24 @@ def emit(ins):
         s = src()
         if s is None: raise Unsupported(m)
         out.append('uint32_t sv = %s;' % s)
-        d = dst_r()
+        dea, d = rmw_read(lo[1], sz, out, 'd')
+        if d is None: raise Unsupported(m)
         out.append('uint32_t dv = %s;' % d)
         if m.startswith('add'):
             out.append('uint32_t r = m68k_add_flags(m, sv, dv, %d);' % sz)
-            dst_w('r')
+            if not rmw_write(lo[1], sz, dea, 'r', out, 'd'): raise Unsupported(m)
         elif m.startswith('sub'):
             out.append('uint32_t r = m68k_sub_flags(m, sv, dv, %d);' % sz)
-            dst_w('r')
+            if not rmw_write(lo[1], sz, dea, 'r', out, 'd'): raise Unsupported(m)
         elif m.startswith('cmp'):
             out.append('m68k_cmp_flags(m, sv, dv, %d);' % sz)
+            if dea is not None and lo[1].kind == 'post':
+                out.append('m->a[%d] += %d;' % (lo[1].r, sz))
         else:
             op = {'and': '&', 'andi': '&', 'or': '|', 'ori': '|',
                   'eor': '^', 'eori': '^'}[m]
             out.append('uint32_t r = dv %s sv;' % op)
-            dst_w('r')
+            if not rmw_write(lo[1], sz, dea, 'r', out, 'd'): raise Unsupported(m)
             out.append('m68k_logic_flags(m, r, %d);' % sz)
         return out
     if m in ('adda', 'suba'):
@@ -325,14 +360,15 @@ def emit(ins):
         out.append('m->n = 0; m->z = 1; m->v = 0; m->c = 0;')
         return out
     if m in ('neg', 'not'):
-        d = read_op(lo[0], sz, out, 's')
+        dea, d = rmw_read(lo[0], sz, out, 's')
+        if d is None: raise Unsupported(m)
         out.append('uint32_t dv = %s;' % d)
         if m == 'neg':
             out.append('uint32_t r = m68k_sub_flags(m, dv, 0u, %d);' % sz)
         else:
             out.append('uint32_t r = m68k_trunc(~dv, %d);' % sz)
             out.append('m68k_logic_flags(m, r, %d);' % sz)
-        if not write_op(lo[0], sz, 'r', out, 's2'): raise Unsupported(m)
+        if not rmw_write(lo[0], sz, dea, 'r', out, 's2'): raise Unsupported(m)
         return out
     if m == 'ext':
         r = lo[0].r
@@ -356,9 +392,11 @@ def emit(ins):
     if m in ('mulu', 'muls'):
         s = src()
         r = lo[1].r
-        # data-dependent on the 68000, so charge the documented formula
-        # rather than an average: MULU 38 + 2 per set bit, MULS 38 + 2 per
-        # 0->1 or 1->0 transition in the source with a trailing zero.
+        # NOTE: mulu/muls/divu/divs are data-dependent on real hardware,
+        # but the measured edge already carries the cost this game's
+        # operands actually produce -- a hand-written 38 + 2*bitcount came
+        # out four cycles light against the oracle every time.  Measure,
+        # do not model.
         out.append('{ uint16_t sw_ = (uint16_t)(%s); unsigned k_ = 0;' % s)
         if m == 'mulu':
             out.append('  for (int b_ = 0; b_ < 16; b_++) if ((sw_ >> b_) & 1) k_++;')
@@ -367,7 +405,7 @@ def emit(ins):
                        ' for (int b_ = 0; b_ < 16; b_++)'
                        ' { unsigned cb_ = (sw_ >> b_) & 1;'
                        '   if (cb_ != pv_) k_++; pv_ = cb_; }')
-        out.append('  m->cycles += 38 + 2 * k_; }')
+        out.append('  (void)k_; }')
         if m == 'mulu':
             out.append('m->d[%d] = (uint32_t)((uint16_t)%s) * (uint32_t)(uint16_t)m->d[%d];'
                        % (r, s, r))
@@ -379,7 +417,7 @@ def emit(ins):
     if m in ('divu', 'divs'):
         s = src()
         r = lo[1].r
-        out.append('m->cycles += %d;' % (140 if m == 'divu' else 158))
+
         out.append('{ uint32_t dv = %s;' % s)
         out.append('  if (dv == 0) { m->fault = "divide by zero"; m->halted = 1; break; }')
         if m == 'divu':
@@ -395,7 +433,8 @@ def emit(ins):
         return out
     if m in ('asl', 'asr', 'lsl', 'lsr', 'rol', 'ror', 'roxl', 'roxr'):
         if len(lo) == 1:                       # memory shift by one
-            d = read_op(lo[0], sz, out, 's')
+            shea, d = rmw_read(lo[0], sz, out, 's')
+            if d is None: raise Unsupported(m)
             out.append('uint32_t dv = %s; uint32_t cnt = 1;' % d)
             target = None
         else:
@@ -431,14 +470,14 @@ def emit(ins):
                 out.append('m->c = m->x = m68k_msb(dv, %d);' % sz)
         out.append('m->n = m68k_msb(r, %d); m->z = (m68k_trunc(r, %d) == 0); m->v = 0;' % (sz, sz))
         if target is None:
-            if not write_op(lo[0], sz, 'r', out, 's2'): raise Unsupported(m)
+            if not rmw_write(lo[0], sz, shea, 'r', out, 's2'): raise Unsupported(m)
         else:
             out.append('m68k_setd(m, %d, %d, r);' % (target, sz))
         return out
     if m in ('btst', 'bset', 'bclr', 'bchg'):
         bsz = 4 if lo[1].kind == 'd' else 1
         bit = ('%d' % lo[0].v) if lo[0].kind == 'imm' else 'm->d[%d]' % lo[0].r
-        d = read_op(lo[1], bsz, out, 'd')
+        bea, d = rmw_read(lo[1], bsz, out, 'd')
         if d is None: raise Unsupported(m)
         out.append('uint32_t bn = (%s) %% %d;' % (bit, bsz * 8))
         out.append('uint32_t dv = %s;' % d)
@@ -447,7 +486,9 @@ def emit(ins):
             expr = {'bset': 'dv | (1u << bn)', 'bclr': 'dv & ~(1u << bn)',
                     'bchg': 'dv ^ (1u << bn)'}[m]
             out.append('uint32_t r = %s;' % expr)
-            if not write_op(lo[1], bsz, 'r', out, 'd2'): raise Unsupported(m)
+            if not rmw_write(lo[1], bsz, bea, 'r', out, 'd2'): raise Unsupported(m)
+        elif bea is not None and lo[1].kind == 'post':
+            out.append('m->a[%d] += %d;' % (lo[1].r, bsz))
         return out
     if m == 'movem':
         regs = reglist(lo[0].spec if lo[0].kind == 'list' else lo[1].spec)
@@ -881,8 +922,29 @@ def main():
     table = {k: (sum(v) + len(v) // 2) // len(v) for k, v in learn.items()}
     default = 8
     guessed = 0
+    def normal_edge(ins):
+        """The edge this instruction takes when nothing interrupts it.
+
+        An ordinary instruction has one successor; it acquires a second
+        only when an interrupt is taken after it, and that edge carries
+        the exception overhead.  Averaging the two smears 44 cycles of
+        exception cost across every execution, so the normal edge is used
+        here and the exception is charged where it happens.
+        """
+        base = ins.mnem
+        if base in ('bra', 'jmp', 'bsr', 'jsr') and ins.ops:
+            t = lower(ins.ops[0])
+            if t.kind == 'abs':
+                e = edges.get((ins.addr, t.v & 0xffffff))
+                if e is not None:
+                    return e
+        return edges.get((ins.addr, ins.next))
+
     for ins in insns:
-        if ins.addr in measured:
+        e = normal_edge(ins)
+        if e is not None:
+            ins.cycles = e
+        elif ins.addr in measured:
             ins.cycles = measured[ins.addr]
         else:
             ins.cycles = table.get(shape(ins), default)
@@ -890,10 +952,7 @@ def main():
         # per-edge costs for the two-way instructions
         ins.cyc_taken = ins.cyc_fall = 0
         base = ins.mnem
-        if base in ('mulu', 'muls', 'divu', 'divs'):
-            # charged by the emitted formula instead, so the measured
-            # mean must not also be charged
-            ins.cycles = 0
+
         if (base in COND or base.startswith('db')) and ins.ops:
             tgt = lower(ins.ops[-1])
             t = edges.get((ins.addr, tgt.v & 0xffffff)) if tgt.kind == 'abs' else None

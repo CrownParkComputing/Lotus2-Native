@@ -182,8 +182,9 @@ static inline int m68k_take_irq(M68K *m, int level)
     m68k_push32(m, m->pc);
     m68k_push16(m, old);
     m->pc = m68k_rd(m, (uint32_t)(24 + level) * 4, 4);
-    /* No explicit exception cost: the measured edge into the handler
-     * already contains it, and adding 44 here counts it twice. */
+    /* Exception overhead, charged here rather than smeared into the
+     * interrupted instruction's average cost. */
+    m->cycles += 44;
     return 1;
 }
 
