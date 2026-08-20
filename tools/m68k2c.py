@@ -451,7 +451,12 @@ def emit(ins):
             out.append('uint32_t r = m68k_trunc(dv >> cnt, %d);' % sz)
             out.append('m->c = m->x = cnt ? ((dv >> (cnt - 1)) & 1) : 0;')
         elif m == 'asr':
-            out.append('uint32_t r = m68k_trunc((uint32_t)(m68k_ext(dv, %d) >> cnt), %d);' % (sz, sz))
+            # m68k_ext returns an unsigned value, and >> on unsigned is a
+            # LOGICAL shift: the sign bit is not replicated.  At .b and .w
+            # sign-extension hides that, because the bits that matter get
+            # truncated away anyway; at .l it silently drops every other
+            # bit of a shift-through-extend loop.  Cast to signed.
+            out.append('uint32_t r = m68k_trunc((uint32_t)((int32_t)m68k_ext(dv, %d) >> cnt), %d);' % (sz, sz))
             out.append('m->c = m->x = cnt ? ((dv >> (cnt - 1)) & 1) : 0;')
         elif m in ('rol', 'ror'):
             sh = 'cnt %% %s' % bits
