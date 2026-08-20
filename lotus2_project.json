@@ -1,0 +1,79 @@
+{
+  "name": "LotusTurboChallenge2",
+  "root": "/home/jon/Lotus2-Native",
+  "raw_slave": "/tmp/lotus2/Lotus2CD32/Lotus2CD32.slave",
+  "slave_out": "re/pipeline/slave.bin",
+  "data_dir": "original/Lotus2CD32",
+  "overlay_layout": "none",
+  "code_range": "62000-212000",
+  "host_opts": {
+    "chip_size": "0x80000",
+    "exp_mem_size_requested_by_slave": "0x008800A0",
+    "fits_in_window": true
+  },
+  "trace": {
+    "host_cmd": "/home/jon/Lotus2-Native/build/lotus2 --dir /home/jon/Lotus2-Native/original/Lotus2CD32 --frames 600 --ppm-seq re/pipeline/oracle_ --ppm-every 50",
+    "frames": 2000,
+    "ppm_every": 50,
+    "statelog_from": 1500,
+    "statelog_max": 4000000,
+    "out_dir": "re/pipeline",
+    "dumps": [
+      ["0x380000", "0x2000", "slave.bin"],
+      ["0x200000", "0x890000", "fast.bin"],
+      ["0x0", "0x80000", "chip.bin"]
+    ]
+  },
+  "disasm": {
+    "image": "re/pipeline/slave.bin",
+    "base": "0x380000",
+    "out_dir": "re/pipeline/disasm",
+    "seed_range": "380000-381894",
+    "base_register": "0x208000"
+  },
+  "kernel": {
+    "family": "phase-direct",
+    "base": "208000",
+    "names": null,
+    "program_image": null,
+    "program_base": null,
+    "park_pc": null
+  },
+  "stages": {
+    "ingest": {
+      "status": "done",
+      "at": "2026-08-19T20:22:00",
+      "evidence": "cp -r /tmp/lotus2/Lotus2CD32/* original/Lotus2CD32/"
+    },
+    "oracle-trace": {
+      "status": "done",
+      "at": "2026-08-20T02:19:00",
+      "evidence": "2000-frame oracle run: Decrunch rc=0, 128 disk loads (587650 bytes), title screen (frame 1000: Lotus badge + TURBO CHALLENGE 2), car screen (frame 2000: blue Esprit), 4-channel Paula audio live, 29.8M pixels.  Dumps: slave.bin/fast.bin/chip.bin; statelog.bin = 4M records from frame 1500 (steady state, PC alternating $07dxxx <-> $20dxxx)."
+    },
+    "base-detect": {
+      "status": "done",
+      "at": "2026-08-20T02:22:00",
+      "evidence": "base_detect.py over re/pipeline/statelog.bin --code 62000-212000: A3 = $208000 at 99.6% of 3.83M records -> re/pipeline/bases.json.  Corroborated by frame-2000 disasm 'tst.w ($2fee,A3)'.  Secondary: A2 = $1400 (97.3%, chip-RAM structure); A6 = $dff000 (custom chips, expected)."
+    },
+    "dispatch-table": {
+      "status": "done",
+      "at": "2026-08-20T02:40:00",
+      "evidence": "salescurve pattern proven ABSENT from both RAM dumps (find_dispatch.py --family salescurve: not found).  Game kernel is phase-driven direct-call: park loop at $20df80 spins on $2fee(A3), per-frame fixed BSRs; phase word $2fc0(A3) indexes a word table at $20de12.  Only live jump-table dispatch is the Imagitec ProTracker replay's 9-command dispatcher at $62810 (table $62826), reached via VBLANK hook pointers $7d4c4/$7d4c8; cmds 0,2,3,4 observed executing.  New family preset 'imagitec-pt-cmd' added to find_dispatch.py; artefact re/pipeline/handlers.txt.  kernel.family = 'phase-direct'."
+    },
+    "objwalk": {
+      "status": "done",
+      "at": "2026-08-20T03:20:00",
+      "evidence": "--ptrlog ported from swiv_run.c; re/pipeline/objlog.txt = 2000-frame attract timeline (no object pool in attract; phase flags only).  Gameplay reached with --fire-from 2100 (pcset 1931 -> 8868 PCs; Forest course select -> racing with HUD).  Gameplay statelog (frame 5500+, video on -- --no-video stalls the frame tick, see known-issues) identifies the road interpolator at $2142a0 walking A4=A3+$2e8e (5-word keyframes) + A0=chip $64446-, output to scanline edge buffers $205d88/$206188, zoom table $204428."
+    },
+    "translate": {
+      "status": "started",
+      "at": "2026-08-20T03:45:00",
+      "evidence": "re/ARCH.md (measured architecture), re/VERBS.md (verb library: park/sync + display verbs verified against statelog_gameplay.bin, PT command map, road-renderer contract), src/engine/engine.h (phase-direct model: Game base page, verbs API), re/PORTING_GUIDE.md (route-B rules for this family)."
+    },
+    "seed-disasm": {
+      "status": "done",
+      "at": "2026-08-20T02:55:00",
+      "evidence": "combined.bin (chip@0 + fast@0x200000 + slave@0x380000) through Ghidra SeedDisasm with seeds/pcs.txt (1931 PCs) + funcs.txt (61 call targets), A3 pinned to 0x208000 -> re/pipeline/disasm/decomp.c (8677 lines, 192 functions).  IRA listing of slave at re/pipeline/disasm/slave_disasm.txt.  IRQ map: L2=$20f5aa, L3(VERTB)=$20f6c0, L5(BLIT)=$20d91a; sequencer $20dedc-$20e1c0 parks on $2fee(A3)."
+    }
+  }
+}

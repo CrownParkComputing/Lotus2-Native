@@ -1,0 +1,9 @@
+cmd#0           handler=0x06283a
+cmd#1           handler=0x062902
+cmd#2           handler=0x06290c
+cmd#3           handler=0x062912
+cmd#4           handler=0x062986
+cmd#5           handler=0x062990
+cmd#6           handler=0x062998
+cmd#7           handler=0x0629a0
+cmd#8           handler=0x0629c0

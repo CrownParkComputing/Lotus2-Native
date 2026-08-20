@@ -1,0 +1,132 @@
+/* engine.h -- native Lotus Turbo Challenge 2 engine: a C rendering of the
+ * phase-direct kernel (see re/ARCH.md, re/VERBS.md).  There is no object
+ * verb table in this engine: a sequencer drives the game by writing phase
+ * + params into the base page and parking on the frame tick, and VBLANK
+ * runs the fixed tail (PT-replay interface, music).  Gameplay is the road
+ * interpolator + blitter road bands + sprite/scenery passes.
+ *
+ * TRANSLATE convention: the 68000 base page (A3 = $208000) and chip RAM
+ * stay guest byte images (guest.h), so every ported routine is diffable
+ * word-for-word against the oracle dumps in re/pipeline/.  Named field
+ * macros below wrap the hot offsets; add names as routines are ported.
+ *
+ * Units: PAL 320x200, bitplane stride 8000 bytes, 50 Hz VBL.  One phase =
+ * one screen state; frame phases alternate 0x11/0x13 (double-buffered).
+ */
+#ifndef LOTUS2_ENGINE_H
+#define LOTUS2_ENGINE_H
+
+#include <stdint.h>
+#include <stdbool.h>
+#include "guest.h"
+
+#define LOTUS2_SCREEN_W 320
+#define LOTUS2_SCREEN_H 200
+#define LOTUS2_PLANE_STRIDE 0x1f40
+#define LOTUS2_MAX_PLANES 5
+
+/* phase values observed in g2fe0 (extend as the sequencer is decoded) */
+enum {
+    PHASE_FRAME_A = 0x11,   /* frame phase, buffer A active */
+    PHASE_FRAME_B = 0x13,   /* frame phase, buffer B active */
+    PHASE_STEP_10 = 0x10,   /* sequence steps seen in the attract log */
+    PHASE_STEP_18 = 0x18,
+    PHASE_STEP_34 = 0x34,
+};
+
+/* base-page offsets (re/ARCH.md "Registers / globals") */
+enum {
+    G_PHASE_IDX   = 0x2fc0,  /* VBLANK param table index */
+    G_SCREEN_A    = 0x2fd6,  /* long: front chip buffer ($10186) */
+    G_SCREEN_B    = 0x2fda,  /* long: back chip buffer ($1bd06) */
+    G_PHASE       = 0x2fe0,
+    G_TICK        = 0x2fee,  /* frame tick set by VBLANK; parked on */
+    G_EXIT_SEQ    = 0x2ff0,
+    G_BLITQ_IN    = 0x2fa4,
+    G_BLITQ_OUT   = 0x2fa8,
+    G_PAL_BANK    = 0x3000,  /* fade bank selector for load_palette */
+    G_PALETTE     = 0x320c,  /* 32 RGB4 words: master palette */
+};
+
+/* chip-RAM addresses the display verbs touch (re/ARCH.md memory map) */
+enum {
+    CHIP_FADE_BANKS   = 0x5400,  /* 9 banks x 32 words built by build_fade */
+    CHIP_COP_BPLCON0  = 0x7ff22, /* copper MOVE operand: BPLCON0 */
+    CHIP_COP_BPLPTRS  = 0x7ff44, /* copper MOVEs: BPLxPTH/L pairs */
+    CHIP_COP_PALETTE  = 0x7ff74, /* copper MOVEs: COLOR00..31 */
+    CHIP_COPLIST_1    = 0x7f5f0, /* the two COP1LC targets seen in trace */
+    CHIP_COPLIST_2    = 0x7fedc,
+};
+
+#define GUEST_FAST_ADDR 0x200000u   /* ExpMem window */
+#define GUEST_FAST_SIZE 0x890000u
+
+/* What the engine needs from the outside world each frame: the two
+ * joystick words as the hardware would report them, and CIA-A PRA whose
+ * bits 6 and 7 are the two fire buttons (active low). */
+typedef struct {
+    uint16_t joy0dat, joy1dat;
+    uint8_t  cia_pra;
+} Input;
+
+typedef struct {
+    uint8_t *chip;   /* guest chip RAM image (GUEST_CHIP_SIZE) */
+    uint8_t *base;   /* guest base page window ($208000, GUEST_BASE_SIZE) */
+    uint8_t *fast;   /* full ExpMem image ($200000+GUEST_FAST_SIZE) or NULL;
+                        when set, `base` points at fast + $8000 */
+} Game;
+
+/* fast-image accessors taking RUNTIME addresses ($20xxxx) */
+static inline uint16_t f16(const Game *g, uint32_t addr)
+{ return g16(g->fast, addr - GUEST_FAST_ADDR); }
+static inline uint32_t f32(const Game *g, uint32_t addr)
+{ return g32(g->fast, addr - GUEST_FAST_ADDR); }
+static inline void pf16(Game *g, uint32_t addr, uint16_t v)
+{ p16(g->fast, addr - GUEST_FAST_ADDR, v); }
+static inline void pf32(Game *g, uint32_t addr, uint32_t v)
+{ p32(g->fast, addr - GUEST_FAST_ADDR, v); }
+
+/* ---- gameplay: road pipeline stages (re/pipeline/disasm/road_213534.txt,
+ * driver chain at $212f12; each stage is snapshot-verified) ---- */
+void road_interpolate(Game *g, int which);   /* $214268 / $21427a */
+void road_blitqueue(Game *g);                /* $2143c2 */
+void road_band_bounds(Game *g, uint32_t view);  /* $214354; $214344/$21434c */
+uint16_t road_keyframes(Game *g, uint32_t a2, uint32_t course_pos,
+                        uint16_t *out_line);   /* $213edc */
+void road_keyframes_near(Game *g);             /* $213eb4 */
+void road_perspective_near(Game *g, uint16_t d3_in);  /* $21337c; $213416 */
+void road_sky(Game *g);                        /* $2136f6 */
+#include "blitter.h"
+uint32_t scen_next_a2(Game *g, uint32_t a2);   /* $215a7a */
+uint32_t scen_next_a0(Game *g, uint32_t a0);   /* $215a9c */
+void     scen_next_table(Game *g);             /* $215adc */
+uint32_t scen_next_a1(Game *g, uint32_t a1);   /* $215b24 */
+void     scen_sort(Game *g);                   /* $215b58 */
+
+/* ---- car model ---- */
+void car_update(Game *g, uint32_t view);       /* $2129f2 */
+void car_checkpoint(Game *g, uint32_t view);   /* $212680 */
+void car_clock(Game *g, uint32_t view);        /* $21263c */
+void car_distance(Game *g, uint32_t view);     /* $212662 */
+void car_shape(Game *g, uint32_t view);        /* $212ba4 */
+void car_drive(Game *g, uint32_t view);        /* $212734 */
+void car_tick(Game *g, uint32_t view);         /* $21270a */
+void car_frame_latch(Game *g);                 /* $211dd4 */
+void race_frame_begin(Game *g, uint16_t d0_in); /* $212cea */
+void race_frame_publish(Game *g);              /* $212e58 */
+void car_latch_gap(Game *g);                   /* glue: $211058 only */
+
+/* ---- input ---- */
+void input_read(Game *g, const Input *in);     /* $211770 */
+
+uint16_t road_bands(Game *g, Blitter *bl, uint32_t a0, uint32_t a4,
+                    uint32_t a2, uint16_t d1, uint16_t d2, uint16_t d4,
+                    uint32_t d5, uint16_t d6);   /* $213534 */
+
+/* ---- per-frame display verbs (VERBS.md §2, ported from decomp.c) ---- */
+void swap_screens(Game *g);                          /* $20f69e */
+void build_fade(Game *g);                            /* $2102ca */
+void build_copper_planes(Game *g, int planes, uint32_t buf); /* $210296 */
+void load_palette(Game *g);                          /* $210272 */
+
+#endif

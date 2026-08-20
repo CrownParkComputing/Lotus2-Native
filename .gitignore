@@ -1,0 +1,28 @@
+# Build artefacts
+build/
+*.o
+*.a
+
+# Retail content (never commit)
+original/
+/tmp/lotus2/
+
+# Generated artefacts
+re/pipeline/oracle_*.ppm
+re/pipeline/slave.bin
+re/pipeline/fast.bin
+re/pipeline/chip.bin
+re/pipeline/copper.txt
+re/pipeline/pcset.txt
+re/pipeline/objlog.txt
+re/pipeline/disasm/
+re/pipeline/*.bin
+
+# Editor and IDE junk
+.vscode/
+.idea/
+*~
+*.swp
+.DS_Store
+re/pipeline/road/
+re/pipeline/gate_*.ppm

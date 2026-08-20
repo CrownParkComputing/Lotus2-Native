@@ -1,0 +1,167 @@
+# Known issues for the Lotus Turbo Challenge 2 (CD32, 1991) native port.
+#
+# Every observed stub or unsupported path lives here, with owner,
+# evidence, expected semantics, and release impact, per the cookbook.
+# None of these block the cook until they are fixed; see cookbook §release.
+
+[[issue]]
+id          = "lotus2-rnc2-decoder"
+title       = "RNC2 (Rob Northen compression, method 2) decoder is broken"
+owner       = "native-host"
+status      = "closed"
+severity    = "release_blocker"
+evidence    = "Slave reads 1024 bytes from Disk.1 offset 0 (CRC=$418e matches 'install 1.13'), then calls resload_Decrunch(a0=slave+0x10AA, a1=$0200).  Host's rnc2_unpack() returns rc=-5 (back-reference distance > opos) before producing any output.  Slave then executes $0200 as code (mostly zeros) and the host stops the slave on the failure."
+expected_semantics = "resload_Decrunch on an RNC2 stream produces the unpacked bytes and returns their size in D0 (WHDLoad contract).  The slave's tail bytes from slave+0x10AA ('RNC\\002' magic, unpacked size=$00001000, packed size=$0000064A) are an RNC2 stream."
+release_impact = "Cannot get past Decrunch.  Without the actual install body in low memory, the slave jumps to garbage code and cannot continue.  This blocks every later stage (game load, IRQ setup, displays)."
+probe       = "./build/lotus2 --dir original/Lotus2CD32 --frames 30"
+probe_log   = "whdload: Decrunch $3810aa -> $000200 packed=1610 unpacked=4096/4096 rc=0"
+resolution  = """
+Fixed 2026-08-20.  src/host/rnc2.c is now a faithful port of the
+method-2 unpack path from the public decompilation of RNC ProPack
+(lab313ru/rnc_propack_source, main.c): MSB-first bit reader refilled
+one byte at a time, 16-bit rolling XOR key rotated after each literal,
+fixed bit-cascade match offsets completed by a trailing literal byte.
+The previous attempt had collapsed read_byte/input_bits into one
+helper and broken the cascade; the port keeps the reference structure
+verbatim.  Verified standalone against the blob at slave file offset
+$10CA: unpacks to exactly 4096 bytes and matches the header CRC16
+($AB5A); output begins with valid 68000 install code (BSR/BRA chains,
+LEA $DFF000,A6).  The assembled-ProPack wrapper detour
+(tools/assemble_rnp.sh, tools/build_rnp.sh, third_party/rnc/) is no
+longer part of the build.
+"""
+notes       = """
+Derivation path attempted:
+- xoreos: repo not available locally, no online access from build host.
+- lab313ru/rnc_propack_source: public decompilation; copied the relevant
+  per-block inner loop verbatim but the surrounding "read byte" / "input
+  bits" helpers were rewritten to a single MSB-first reader.  The result
+  blows the safety bound on the first back-reference (rc=-5).
+- RNCtools / aybe/RNCUnpacker: Microsoft .NET (RNCUnpacker.NET) — not
+  portable to C without significant rework.
+- CorsixTH / Simon Tatham rnc.cpp: the MIT-licensed decompressor there is
+  RNC1 only (signature 0x524E4301).  Lotus 2's install blob is RNC2
+  (0x524E4302) which uses a different algorithm.
+- WHDLoad itself: greppable on whdload.de via the autodoc page lists RNC1,
+  RNC2, Imploder, ATN!, TPWM and Cr[Mm][!2] as supported by the actual
+  WHDLoad resload_Decrunch.  No source is shipped with the public dev pack.
+"""
+fix_hint    = """
+Two approaches will work; the second one will work definitively:
+1. Find and transplant CorsixTH's MSB-first back-reference state machine
+   for RNC2 (no corrigible Huffman tables, fixed bit codes).  Needs the
+   full C port.
+2. Drop in a wrapper for the original RNC ProPack.  The DOS/Windows
+   command-line tool from wepl (RNC v1.0+) source-on-request: ask
+   Bert J\"ohlich or look in the whdload.de developer archive (it ships
+   with the DEV package).  The 16-bit 8086 decompressor runs in <1KB
+   of memory and can be invoked from C with a small trampoline.
+Whichever is chosen, the public algorithm from PSX-SPX above describes
+the exact decode cascade and is what this implementation is meant to
+encode.
+"""
+
+[[issue]]
+id          = "lotus2-kickstart"
+title       = "CD32 / AGA master: ws_Version=17 implies a Kickstart may be required"
+owner       = "native-host"
+status      = "open"
+severity    = "informational"
+evidence    = "Slave header ws_Version = 0x0011 (17).  From the WHDLoad autodoc, ws_Version 16+ forces the slave to be linked with the ws_kickname / ws_kicksize / ws_kickcrc fields (all zero here), which WHDLoad then uses as the safety check that no Kickstart image is required.  Because the slave's ws_kicksize is zero, WHDLoad will not pull a Kickstart image, and the boot continues without one.  The host therefore needs no Kickstart for Lotus 2 — but the slave does still poke at $F80000 for the AGA copper / Blitter registers, and the host's $F80000 has the form of a normal MC68000 reset state (all zeroes), which is correct for a brand-new machine."
+expected_semantics = "ws_kicksize == 0 means WHDLoad will not load a Kickstart image (no resload_LoadKick call), per the autodoc."
+release_impact = "No impact today.  Becomes a real issue only if a slave patch dereferences an ExecBase pointer set up by the Kickstart ROM."
+probe       = "grep ws_kicksize re/pipeline/disasm/slave_disasm.txt"
+notes       = """
+The ReadMe also confirms this: 'That install applies to ... Lotus Turbo
+Challenge 2 ...'.  CD32 ports use the built-in CD32 ROM; the slave
+publishes ws_kickname = ws_kicksize = ws_kickcrc = 0 so WHDLoad knows.
+"""
+
+[[issue]]
+id          = "lotus2-diskimage-format"
+title       = "Disk.1 is a RawDIC dump, not a standard Amiga filesystem"
+owner       = "native-host"
+status      = "closed"
+severity    = "informational"
+evidence    = "original/Lotus2CD32/Disk.1 is 958468 bytes.  The Lotus2 ReadMe states 'That install requires WHDLoad and RawDIC to be in the path'."
+expected_semantics = "SWIV's whdload_open_disk() uses the byte offset the slave gave (via resload_DiskLoad) directly into the image.  Lotus 2 is the same: the slave called resload_DiskLoad(offset=0, length=1024, disk=1, $70000) and 1024 bytes were read straight from the image, with our host's tail-zero-fill kicking in only if the slave reads past $E9FE4 (the last byte of the 958468-byte image)."
+release_impact = "None — the path works as-is."
+probe       = "./build/lotus2 --dir original/Lotus2CD32 --frames 1"
+probe_log   = "whdload: Disk.1 is 958468 bytes; whdload: frame 0 DiskLoad disk 1 $000000+$400 -> $070000"
+
+[[issue]]
+id          = "lotus2-expmem-claim-too-large"
+title       = "ws_ExpMem is unusually large (~$8800A0 = ~8.5 MB)"
+owner       = "native-host"
+status      = "open"
+severity    = "low"
+evidence    = "Byte read at slave_base+0x20 (file offset 0x40) is 00 88 00 A0 (big endian) = 0x008800A0 = 8,912,032 bytes.  The Lotus2 ReadMe says the install uses 1 MB of OtherMem, which is much smaller.  Most likely the slave allocates most of that as an in-game data buffer it fills from Disk.1 after the install.  The host grants the full 8.5 MB to keep going."
+expected_semantics = "ws_ExpMem is read by the slave before the install; the host has to allocate the full request or the slave aborts with TDREASON_OSEMUFAIL or similar."
+release_impact = "Memory cost only.  8.5 MB of fast RAM is well below what a modern host can spare, so this isn't an issue in practice.  Worth filing a separate note in case the slave later shortens the request — the host's WHD_EXPMEM_BASE is a fixed window above the slave."
+probe       = "grep 'whdload: Lotus2CD32.slave' /tmp/run.log"
+
+[[issue]]
+id          = "lotus2-no-joyport-clear"
+title       = "ReadJoyPort requested but no gamepad device path"
+owner       = "native-host"
+status      = "open"
+severity    = "low"
+evidence    = "The slave is ws_Version=17 (and JOTD-installed v1.13 typically wants resload_ReadJoyPort at least for the 'ButtonWait' option).  The host wires joy_state[port] (an Amiga byte) but leaves it at zero unless --fire-from is given.  Lotus 2 needs the CD32 pad; either the host should populate joy_state from a real gamepad, or we accept the keyboard-driven menu."
+expected_semantics = "WHDLoad's resload_ReadJoyPort returns a state formatted as lowlevel.library/ReadJoyPort.  The host's read_joy_port() function in src/host/whdload.c returns RJP_TYPE_JOYSTK with up/down/left/right/fire derived from joy_state."
+release_impact = "Without an input source, the game advances only on its own (e.g. as a demo) and input has to come from --fire-from or --ppm-seq.  This is acceptable for an oracle run; it becomes a real issue only when we want to play."
+probe       = "./build/lotus2 --dir original/Lotus2CD32 --fire-from 1 --frames 5"
+
+[[issue]]
+id          = "lotus2-patch-return-value"
+title       = "resload_Patch return value not asserted"
+owner       = "native-host"
+status      = "open"
+severity    = "low"
+evidence    = "SWIV's whdload.c returns D0=0 from resload_Patch; the Deluxe Galaga native port returns D0=$970C because some slaves compare the magic.  Lotus 2's slave may or may not check the magic — we have not yet reached a Patch sentinel that requires it."
+expected_semantics = "WHDLoad's resload_Patch returns the unpacked size on success (per autodoc).  A magic-sentinel return is not part of the documented contract; slaves that compare a fixed value are fragile."
+release_impact = "If a later Lotus 2 slave version is encountered that checks D0=$970C, install will be aborted.  We will know because Patch will succeed here but the slave will branch to FAILMSG just after."
+probe       = "grep 'whdload: Patch list' /tmp/run.log"
+
+[[issue]]
+id          = "lotus2-framebuffer-slave-stack-collision"
+title       = "Slave uses 0x200-0xFFF as both install dest and stack"
+owner       = "native-host"
+status      = "informational"
+evidence    = "Slave does `lea $200.w, A1`; `movea.l A1, A7`; `jsr ($18, A2)` (resload_Decrunch).  Decrunch overwrites the same range $200-$FFF with the unpacked install body.  Return-address on the stack sits at $1FC-$1FF (A7=$200 before jsr, jsr decrements before write)."
+expected_semantics = "The slave's rts from resload_Decrunch hits the patched return PC, then continues with the inflated install body."
+release_impact = "Tiny: documented so a reviewer doesn't try to 'fix' the apparent collision by relocating the stack."
+probe       = "Object-dump the slave's lea/movea/jsr trio at $381004"
+
+[[issue]]
+id          = "lotus2-video-early-fetch-fine-scroll"
+title       = "Video self-test fails 'early-fetch fine-scroll lead'"
+owner       = "native-host"
+status      = "open"
+severity    = "low"
+evidence    = "`make selftest` reports: video self-test FAIL early-fetch fine-scroll lead (amiga.c VCHECK at the early-fetch fine-scroll case, expecting framebuf[0] == rgb4(0xf00)).  The identical VCHECK exists unchanged in SWIV-Amiga's src/host/amiga.c, so this is inherited host behaviour, not a Lotus 2 regression.  Input (9 cases) and audio (8 cases) self-tests pass."
+expected_semantics = "With bplcon1 fine-scroll set and early fetch start, the first fetched pixel should appear at framebuf[0]; the host currently leaves it black."
+release_impact = "Unknown; SWIV shipped with the same code path.  A one-pixel lead error on fine-scrolled playfields would show as a 1px shift on horizontally scrolling road edges if Lotus 2 uses fine scroll.  Verify against real hardware frames during PARITY rather than guessing now."
+probe       = "make selftest"
+
+[[issue]]
+id          = "lotus2-no-video-stalls-game"
+title       = "--no-video stalls the game in the park loop (frame tick never fires)"
+owner       = "native-host"
+status      = "open"
+severity    = "medium"
+evidence    = "Two runs, identical except video: `--no-video` 6000-frame run spent frames 5000-5580 (4M-record statelog) 100% in the $20d000 park loop spinning on $2fee(A3); the video-enabled run reached gameplay ($212000-$217000 = 3.8M of 4M records).  The VERTB path that sets $2fee(A3) apparently never runs with video disabled.  Same failure shape as the Uridium 2 note in the shared cookbook ('--no-video stalls some games')."
+expected_semantics = "--no-video should skip rendering work only; the emulated VBLANK/copper interrupt cadence must still fire so the guest's frame tick advances."
+release_impact = "Headless pipeline runs (CI, parity) must NOT use --no-video until this is fixed; every capture above was done with video on.  Not a correctness issue for normal runs."
+probe       = "./build/lotus2 --dir original/Lotus2CD32 --frames 6000 --fire-from 2100 --no-video"
+
+[[issue]]
+id          = "lotus2-no-engine-family-yet"
+title       = "Kernel family is still unknown (no engine_family in stage-5 yet)"
+owner       = "translate"
+status      = "closed"
+severity    = "informational"
+evidence    = "boot never reached the game's title screen, so we have no executed PC set above slave-level.  Cannot name the engine family until stage 5 (oracle boot-to-title)."
+expected_semantics = "Stage 3 wants a kernel family in lotus2_project.json.  Until the slave's Decrunch issue is closed, no kernel_objwalk or find_dispatch runs can run; the family name is left blank."
+release_impact = "All downstream PARITY / dispatch-table work is blocked until stage 2 finishes."
+probe       = "cat lotus2_project.json"
+resolution  = "2026-08-20: family named 'phase-direct' after dispatch-table proved the salescurve verb-table pattern absent and objwalk confirmed the sequencer + road-interpolator architecture.  See COOKBOOK.md dispatch-table/objwalk sections."
