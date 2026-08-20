@@ -104,6 +104,16 @@ uint32_t scen_next_a1(Game *g, uint32_t a1);   /* $215b24 */
 void     scen_sort(Game *g);                   /* $215b58 */
 int      scen_prepare(Game *g, uint32_t *out_a0, uint32_t *out_a2); /* $21508a */
 
+/* The scenery drawing routines are register machines; whole 32-bit
+ * registers are carried because `move.w` leaves the high half alone and
+ * the snapshot gate compares all 32 bits. */
+typedef struct {
+    uint32_t d0, d1, d2, d3, d4, d5, d6, d7;
+    uint32_t a2, a4;
+} Span;
+void span_fill(Game *g, Span *s);              /* $2169e0 */
+uint32_t scen_shape_ptr(Game *g, uint32_t a1, uint32_t d6);  /* $215dac */
+
 /* ---- car model ---- */
 void car_update(Game *g, uint32_t view);       /* $2129f2 */
 void car_checkpoint(Game *g, uint32_t view);   /* $212680 */

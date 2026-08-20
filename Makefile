@@ -31,7 +31,8 @@ RAYLIB_FLAGS = -I$(HOME)/.local/include $(HOME)/.local/lib/libraylib.a \
 INSTALL ?= original/Lotus2CD32
 
 ENGINE = src/engine/engine.c src/engine/compositor.c src/engine/road.c \
-	src/engine/blitter.c src/engine/car.c src/engine/input.c
+	src/engine/blitter.c src/engine/car.c src/engine/input.c \
+	src/engine/scenery.c
 ENGINE_H = src/engine/engine.h src/engine/guest.h src/engine/compositor.h \
 	src/engine/blitter.h
 
