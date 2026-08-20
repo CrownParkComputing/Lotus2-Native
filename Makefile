@@ -83,8 +83,27 @@ build/lotus2_native: src/engine/lotus2_native.c $(ENGINE) $(ENGINE_H)
 	$(CC) -O2 -std=c11 -Wall -Wextra -Isrc/engine -o $@ \
 		src/engine/lotus2_native.c $(ENGINE)
 
-# PLAYABLE NATIVE BUILD: the viewer driven by recompiled C, no emulator.
-# Same window, same pad handling; the CPU behind it is compiled game code.
+# PLAY: the game itself, on recompiled C, with no emulator linked in.
+# NOT the viewer -- that boots the game only to freeze it once the course
+# data lands and defaults to a debug map page, so it was never a way to
+# play.  This is the game screen, the pad and the sound, nothing else.
+build/lotus2_game: src/host/lotus2_game.c $(HOST) $(HOST_H) \
+		src/host/pad.c src/host/cpu_recomp.c src/recomp/m68krt.h \
+		build/lotus2_recomp.o
+	mkdir -p build
+	$(CC) $(CFLAGS_RECOMP) -o $@ src/host/lotus2_game.c $(HOST) \
+		src/host/pad.c src/host/cpu_recomp.c build/lotus2_recomp.o \
+		$(RAYLIB_FLAGS)
+
+play: build/lotus2_game
+	./build/lotus2_game --dir $(INSTALL)
+
+# Play with the debug pages one keypress away: 1 GAME, 2 COURSE,
+# 3 TRACK, 4 GEOM, 5 DISPLAY; F5 freezes the emulation to read state.
+debug: build/lotus2_play
+	./build/lotus2_play --live --dir $(INSTALL)
+
+# The debug viewer driven by recompiled C (map/track/geometry pages).
 build/lotus2_play: src/viewer/lotus2_view.c $(HOST) $(HOST_H) \
 		src/host/pad.c src/host/cpu_recomp.c src/recomp/m68krt.h \
 		build/lotus2_recomp.o
@@ -92,9 +111,6 @@ build/lotus2_play: src/viewer/lotus2_view.c $(HOST) $(HOST_H) \
 	$(CC) $(CFLAGS_RECOMP) -Isrc/engine -o $@ \
 		src/viewer/lotus2_view.c $(HOST) src/host/pad.c \
 		src/host/cpu_recomp.c build/lotus2_recomp.o $(RAYLIB_FLAGS)
-
-play: build/lotus2_play
-	./build/lotus2_play --live --dir $(INSTALL)
 
 # Live viewer: runs the game through the oracle host in a window, with the
 # TRACK / GEOMETRY / DISPLAY debug panels over the live guest state.
@@ -310,4 +326,4 @@ test: selftest boot-test
 clean:
 	rm -rf build
 
-.PHONY: coherence play no-musashi decode-check recomp recomp-gate statelog trace pcset drive all native boot-test selftest oracle test clean gate-capture road-capture render-gate view view-race track course
+.PHONY: debug coherence play no-musashi decode-check recomp recomp-gate statelog trace pcset drive all native boot-test selftest oracle test clean gate-capture road-capture render-gate view view-race track course

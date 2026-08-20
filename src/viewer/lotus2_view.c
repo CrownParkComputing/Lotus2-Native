@@ -79,7 +79,14 @@ static int course_sel;
 #define COURSE_SEGMENTS 1024
 #define COURSE_RECORD   0x10
 
-enum { MODE_COURSE, MODE_TRACK, MODE_GEOM, MODE_DISPLAY };
+enum { MODE_GAME, MODE_COURSE, MODE_TRACK, MODE_GEOM, MODE_DISPLAY };
+
+/* The game itself is the front page.  This tool used to boot the game
+ * only to freeze it the moment the course data landed, which is useful
+ * for reading state and useless for playing; now it plays by default and
+ * the debug pages are a key away. */
+static void page_game(void);
+
 
 /* ---- house palette (swivview) ---- */
 static const Color BAR_BG   = {28, 28, 34, 255};
@@ -1086,13 +1093,29 @@ static void page_display(void)
     }
 }
 
+/* The game, scaled to fit, with a one-line status strip.  Everything the
+ * debug pages show is still a keypress away; this is just the thing you
+ * actually play. */
+static void page_game(void)
+{
+    float s = (float)WIN_W / SCREEN_W;
+    if ((float)(WIN_H - 26) / SCREEN_H < s) s = (float)(WIN_H - 26) / SCREEN_H;
+    Rectangle src = { 0, 0, SCREEN_W, SCREEN_H };
+    Rectangle dst = { (WIN_W - SCREEN_W * s) / 2,
+                      26 + (WIN_H - 26 - SCREEN_H * s) / 2,
+                      SCREEN_W * s, SCREEN_H * s };
+    DrawTexturePro(game_screen, src, dst, (Vector2){0, 0}, 0.0f, WHITE);
+    ui_text("1 GAME   2 COURSE   3 TRACK   4 GEOM   5 DISPLAY   "
+            "F5 freeze   F11 full   P pause", 16, 4, 18, LABEL);
+}
+
 int main(int argc, char **argv)
 {
     WhdConfig whd = { .dir = "original/Lotus2CD32",
                       .slave = "Lotus2CD32.slave" };
     long fire_from = 2100, fire_period = 100, shot_at = -1;
     const char *shot_path = NULL;
-    int mode = MODE_COURSE, shot_mode = MODE_COURSE;
+    int mode = MODE_GAME, shot_mode = MODE_GAME;
     const char *course_path = "re/pipeline/course_forest.l2c";
 
     for (int i = 1; i < argc; i++) {
@@ -1118,7 +1141,8 @@ int main(int argc, char **argv)
         }
         else if (!strcmp(argv[i], "--page") && i + 1 < argc) {
             const char *w = argv[++i];
-            shot_mode = !strcmp(w, "COURSE")  ? MODE_COURSE
+            shot_mode = !strcmp(w, "GAME")    ? MODE_GAME
+                      : !strcmp(w, "COURSE")  ? MODE_COURSE
                       : !strcmp(w, "TRACK")   ? MODE_TRACK
                       : !strcmp(w, "GEOM")    ? MODE_GEOM
                       : MODE_DISPLAY;
@@ -1171,7 +1195,7 @@ int main(int argc, char **argv)
                    .format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8 };
     road_tex = LoadTextureFromImage(rimg);
     amiga_set_pc_hook(road_pc_hook);
-    bool paused = false, frozen = false;
+    bool paused = false, frozen = false, freeze_on_course = false;
     char status[256];
 
     if (offline) { frozen = true; SetTargetFPS(50); }
@@ -1180,7 +1204,14 @@ int main(int argc, char **argv)
         /* --static freezes the game, so in shot mode only switch it on
          * once the run has reached the capture frame. */
         if (IsKeyPressed(KEY_P)) paused = !paused;
-        if (IsKeyPressed(KEY_ESCAPE)) mode = MODE_COURSE;
+        if (IsKeyPressed(KEY_ESCAPE)) mode = MODE_GAME;
+        if (IsKeyPressed(KEY_F5)) { frozen = !frozen; freeze_on_course = false; }
+        if (IsKeyPressed(KEY_F11)) ToggleFullscreen();
+        if (IsKeyPressed(KEY_ONE))   mode = MODE_GAME;
+        if (IsKeyPressed(KEY_TWO))   mode = MODE_COURSE;
+        if (IsKeyPressed(KEY_THREE)) mode = MODE_TRACK;
+        if (IsKeyPressed(KEY_FOUR))  mode = MODE_GEOM;
+        if (IsKeyPressed(KEY_FIVE))  mode = MODE_DISPLAY;
         if (IsKeyPressed(KEY_F2)) {
             Image s = LoadImageFromScreen();
             ExportImage(s, "lotus2view.png");
@@ -1197,7 +1228,10 @@ int main(int argc, char **argv)
             joy_state[0] = joy_state[1] = stick;
             amiga_run_frame();
             amiga_audio_frame();
-            if (course_data_ready()) {   /* course loaded: stop the game */
+            /* The course landing used to freeze the emulation here.  It
+             * is a debug convenience, not a default: F5 freezes when you
+             * want to read state, and the game keeps running otherwise. */
+            if (course_data_ready() && freeze_on_course) {
                 frozen = true;
                 SetTargetFPS(50);
                 fprintf(stderr, "lotus2_view: course loaded at frame %ld, "
@@ -1211,6 +1245,7 @@ int main(int argc, char **argv)
         ClearBackground(BAR_BG);
 
         switch (mode) {
+        case MODE_GAME:    page_game(); break;
         case MODE_COURSE:  page_course(); break;
         case MODE_TRACK:   page_track(); break;
         case MODE_GEOM:    page_geom(); break;
