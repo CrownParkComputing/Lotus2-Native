@@ -687,6 +687,51 @@ The merge loop at `$2151de` picks the nearest of three iterator streams
 already-ported iterator, and loops — so tier 6 is small once tiers 0-5
 land.
 
+## ROUTE A: the 68000 -> C recompiler (2026-08-20)
+
+The `amiga_decomp_pipeline` notes recorded a fork on 2026-08-19 --
+"(A) deterministic 68k->C recompiler frontend or (B) agent/human semantic
+rewrite ... pending Jon's choice" -- and B happened by default.  A is now
+built: `tools/m68k2c.py`, `src/recomp/m68krt.h`, `make recomp-gate`.
+
+**It passes all 28 snapshot pairs the hand-ports are gated on, byte-exact
+including every register, with no hand-written C.**
+
+How it works.  Each executed instruction becomes one `case` of a
+`switch (pc)` over a machine struct.  `bsr`/`rts` are ordinary pc writes
+against a real stack, so calls need no special handling at all: to run a
+routine you set the pc to the entry snapshot's and spin until it reaches
+the exit snapshot's.  That means the SAME pairs captured for hand-porting
+gate the generated code, unchanged.
+
+Scale: **6998 instructions, 61 mnemonics** covers everything the game
+executes.  That is the whole remaining job -- sequencer, menus, sprites,
+HUD -- not just the scenery pass.
+
+Why it is worth it.  Every hand-porting bug in this project was an
+operand-width or register-write mistake, never a misunderstanding of what
+the code does.  In the generator those rules exist in ONE place, so they
+are either right everywhere or wrong everywhere -- and the gates say
+which.  The recompiler reproduced the last such bug exactly once:
+
+    addq.w #6, A0
+
+An address register as destination is ALWAYS a full 32-bit operation and
+sets no flags, whatever the size suffix says.  Treating it as a word
+operand silently drops the top half.  One fix in the generator turned
+five failing gates green simultaneously.  By hand that is five separate
+bugs, found five separate times, in five separate routines.
+
+**What this does and does not give you.**  It gives a correct, running
+native baseline for the entire game, mechanically.  It does NOT give
+idiomatic native code -- a `switch (pc)` is a fast recompilation, not a
+rewrite.  The intended use is the pattern already proved on the Xbox
+titles: recompile everything so the game runs, then hand-rewrite routine
+by routine where native structure matters, with the gate proving each
+rewrite equivalent.  The hand-ports in `src/engine/` stay exactly as
+they are; they are now the first instalments of that second pass rather
+than the only way to get anything running.
+
 ### three register traps the memory check cannot see (2026-08-20)
 
 `scen_project` ($2160f2) came out with ZERO memory differences and three
