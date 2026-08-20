@@ -146,17 +146,19 @@ trace:
 
 # Which PCs the game ever reaches on a full run into a race.  Triage: a
 # routine in the call graph that never appears here is not on the path to
-# a playable FOREST course, however alarming the call graph looks.
-pcset: build/lotus2
-	SWIV_PCSET=re/pipeline/pcset_race.txt \
-	./build/lotus2 --dir $(INSTALL) --frames 9000 \
-		--fire-from 2100 --fire-period 100 >/dev/null
+# a playable FOREST course, however alarming the call graph looks.  It is
+# also the recompiler's input -- only executed code is translated.
+pcset: re/pipeline/pcset_race.txt
 
 # ---- route A: static recompilation ----
 # tools/m68k2c.py translates every executed instruction to C mechanically.
 # Operand widths and register-write rules live in the generator and
 # src/recomp/m68krt.h, so they are uniform instead of re-derived per port.
 RECOMP_SRC = src/recomp/lotus2_recomp.c
+re/pipeline/pcset_race.txt: build/lotus2
+	SWIV_PCSET=$@ ./build/lotus2 --dir $(INSTALL) --frames 9000 \
+		--fire-from 2100 --fire-period 100 >/dev/null
+
 $(RECOMP_SRC): tools/m68k2c.py re/pipeline/pcset_race.txt build/dasm
 	python3 tools/m68k2c.py --pcset re/pipeline/pcset_race.txt --out $@
 
