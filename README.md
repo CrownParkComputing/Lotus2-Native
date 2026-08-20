@@ -42,6 +42,9 @@ make oracle     # 600-frame capture (--ppm-seq, --ppm-every, --trace)
 make gate-capture  # oracle frame+RAM pairs at frames 2000 and 5600
 make road-capture  # per-stage RAM snapshots of the racing render chain
 make render-gate   # verbs + road stages byte-exact, frames pixel-exact
+make statelog      # ~11s per-instruction register trace of the race frame
+make trace PC=21508a   # annotated listing of one call of that routine
+make pcset         # which PCs a full run into a race ever reaches
 make clean
 ```
 

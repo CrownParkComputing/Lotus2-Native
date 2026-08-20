@@ -672,10 +672,52 @@ The merge loop at `$2151de` picks the nearest of three iterator streams
 already-ported iterator, and loops — so tier 6 is small once tiers 0-5
 land.
 
+### two tools that change the cost of the rest (2026-08-20)
+
+**`tools/trace_call.py` — port from evidence, not from the opcode.**  The
+host already logs 18 longs per instruction (PC, D0-D7, A0-A7, SR) under
+`SWIV_STATELOG`, sampled BEFORE the instruction, so consecutive records
+differ by exactly what the instruction did.  The tool extracts one call
+of a routine and prints the disassembly with the registers each
+instruction changed:
+
+    $215098  move.w  ($30d8,A3), D1     d1=00000020
+    $21509c  asl.w   #4, D1             d1=00000200
+
+That first line is the `$21508a` trap, settled in one line: the
+disassembly cannot tell you whether the game wanted the high or the low
+word of that long, and the trace can.  `make statelog` (~11s) then
+`make trace PC=21508a`.  It also surfaces the partial-write traps for
+free — `move.w ($2ef4,A3),D4` showing `d4=81e00000` says plainly that
+the high word is stale and the following `tst.w D4` only tests the low
+one.
+
+**`make pcset` — triage by what actually runs.**  A call-graph closure
+counts what a subsystem *could* reach; the PC set counts what it *does*.
+Over a 9000-frame run into a FOREST race, only **18 of the 33** scenery
+functions ever execute, and 7 of those are already ported:
+
+    executed, unported (11):  $215bca $215bd2 $215c32 $215d1e $215dac
+                              $215dce $215ea2 $2160f2 $216346 $2169e0
+                              $216aca $216b50
+    never run (15):           $214798 $2147b6 $2147de $214810 $2148b0
+                              $2148b2 $2148da $214914 $21495a $214994
+                              $215906 $2159fa $215c60 $2162dc $216310
+
+So the scenery pass needed for a playable FOREST course is **11
+routines, not 27**.  The whole `$215906` family and its eight callees are
+a second scenery mode selected by `$2e02`/`$2dfe` — almost certainly the
+other courses' weather (night, fog, snow) — real code, but not on the
+path to the first playable course.  Port the 11, ship a course, come
+back for the rest.
+
+CAVEAT: one course, one run.  Before calling any of the 15 dead, re-run
+`make pcset` with the other courses reachable.
+
 What is genuinely left, in dependency order:
 
-* **The remaining 27 scenery functions**, in the tier order above.  The
-  head is done; everything it dispatches to is not.
+* **11 scenery functions** for a playable FOREST course (see the PC-set
+  triage above), in the tier order above; 16 more for the other modes.
 * **The scenery / car-sprite / HUD draw passes.**  Until these land the
   drive demo shows a road with no trees, signs, opponents or dashboard,
   and `race_frame_begin` has to stay gated off (rotating the triple

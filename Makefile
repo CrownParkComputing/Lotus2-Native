@@ -128,6 +128,29 @@ render-gate: build/lotus2_native
 	python3 tools/gate_compare.py re/pipeline/gate_05600.ppm \
 		build/native_05600.ppm
 
+# Per-instruction register trace of ONE call of a routine.  Porting from
+# a disassembly guesses operand sizes; porting from this reads them off.
+#   make statelog                 # ~11s, covers the frame-5600 race pass
+#   make trace PC=21508a          # annotated listing of that routine
+STATELOG ?= re/pipeline/statelog_race.bin
+statelog: build/lotus2
+	SWIV_STATELOG=$(STATELOG) SWIV_STATELOG_FROM=5600 \
+	SWIV_STATELOG_MAX=400000 \
+	./build/lotus2 --dir $(INSTALL) --frames 5602 \
+		--fire-from 2100 --fire-period 100 >/dev/null
+
+trace:
+	@test -n "$(PC)" || { echo "usage: make trace PC=21508a"; exit 2; }
+	python3 tools/trace_call.py $(STATELOG) $(PC) $(TRACEOPTS)
+
+# Which PCs the game ever reaches on a full run into a race.  Triage: a
+# routine in the call graph that never appears here is not on the path to
+# a playable FOREST course, however alarming the call graph looks.
+pcset: build/lotus2
+	SWIV_PCSET=re/pipeline/pcset_race.txt \
+	./build/lotus2 --dir $(INSTALL) --frames 9000 \
+		--fire-from 2100 --fire-period 100 >/dev/null
+
 native: build/lotus2
 
 # Short boot: the slave has to at least start executing after install + patch.
@@ -149,4 +172,4 @@ test: selftest boot-test
 clean:
 	rm -rf build
 
-.PHONY: drive all native boot-test selftest oracle test clean gate-capture road-capture render-gate view view-race track course
+.PHONY: statelog trace pcset drive all native boot-test selftest oracle test clean gate-capture road-capture render-gate view view-race track course
