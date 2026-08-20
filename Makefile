@@ -42,6 +42,11 @@ ENGINE = src/engine/engine.c src/engine/compositor.c src/engine/road.c \
 ENGINE_H = src/engine/engine.h src/engine/guest.h src/engine/compositor.h \
 	src/engine/blitter.h
 
+# Hand-written native C standing in for the game's own instructions.
+# Adding a routine here is what turns recompiled 68000 into a native
+# implementation; make frame-gate decides whether it may stay.
+NATIVE_OVR = src/host/native_overrides.c $(ENGINE)
+
 all: build/lotus2 build/lotus2_native
 
 # The ORACLE: Musashi behind cpu.h.  Its only job from here on is to
@@ -66,8 +71,9 @@ build/lotus2_recomp.o: $(RECOMP_SRC) src/recomp/m68krt.h
 build/lotus2_recomp: src/host/lotus2_run.c $(HOST) $(HOST_H) \
 		src/host/cpu_recomp.c src/recomp/m68krt.h build/lotus2_recomp.o
 	mkdir -p build
-	$(CC) $(CFLAGS_RECOMP) -o $@ src/host/lotus2_run.c $(HOST) \
-		src/host/cpu_recomp.c build/lotus2_recomp.o -lm
+	$(CC) $(CFLAGS_RECOMP) -Isrc/engine -o $@ src/host/lotus2_run.c \
+		$(HOST) src/host/cpu_recomp.c $(NATIVE_OVR) \
+		build/lotus2_recomp.o -lm
 
 # Proof that no emulator is linked in: the native binary must contain no
 # Musashi symbols at all.
@@ -91,9 +97,9 @@ build/lotus2_game: src/host/lotus2_game.c $(HOST) $(HOST_H) \
 		src/host/pad.c src/host/cpu_recomp.c src/recomp/m68krt.h \
 		build/lotus2_recomp.o
 	mkdir -p build
-	$(CC) $(CFLAGS_RECOMP) -o $@ src/host/lotus2_game.c $(HOST) \
-		src/host/pad.c src/host/cpu_recomp.c build/lotus2_recomp.o \
-		$(RAYLIB_FLAGS)
+	$(CC) $(CFLAGS_RECOMP) -Isrc/engine -o $@ src/host/lotus2_game.c \
+		$(HOST) src/host/pad.c src/host/cpu_recomp.c $(NATIVE_OVR) \
+		build/lotus2_recomp.o $(RAYLIB_FLAGS)
 
 play: build/lotus2_game
 	./build/lotus2_game --dir $(INSTALL)
@@ -110,7 +116,8 @@ build/lotus2_play: src/viewer/lotus2_view.c $(HOST) $(HOST_H) \
 	mkdir -p build
 	$(CC) $(CFLAGS_RECOMP) -Isrc/engine -o $@ \
 		src/viewer/lotus2_view.c $(HOST) src/host/pad.c \
-		src/host/cpu_recomp.c build/lotus2_recomp.o $(RAYLIB_FLAGS)
+		src/host/cpu_recomp.c $(NATIVE_OVR) build/lotus2_recomp.o \
+		$(RAYLIB_FLAGS)
 
 # Live viewer: runs the game through the oracle host in a window, with the
 # TRACK / GEOMETRY / DISPLAY debug panels over the live guest state.

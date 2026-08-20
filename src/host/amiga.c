@@ -1629,10 +1629,12 @@ static void recomp_trace(unsigned int pc)
     }
 }
 void swiv_cycles_flush(void);
+void swiv_rtncyc_flush(void);
 
 void swiv_recomp_trace_flush(void)
 {
     swiv_cycles_flush();
+    swiv_rtncyc_flush();
     if (sfxlog) { fclose(sfxlog); sfxlog = NULL; }
     if (pcset_bits) {
         FILE *f = fopen(getenv("SWIV_PCSET"), "w");
@@ -1759,9 +1761,70 @@ static void cycles_hook(unsigned int pc)
     cyc_last_pc = pc;
 }
 
+/* SWIV_RTNCYC=lo,lo,...:  measure what a whole subroutine costs.
+ *
+ * A native override replaces a routine's instructions with C, so it must
+ * charge what those instructions charged or the CPU runs ahead of the
+ * chipset.  The cost is data-dependent (these routines contain loops), so
+ * it is measured per call and averaged rather than derived: enter at the
+ * given pc, remember the stack depth, and close the measurement when the
+ * pc leaves and the stack is back.
+ */
+/* cpu_cycles_run() counts within the current scanline timeslice and
+ * restarts each line, so a routine that straddles a line boundary gets a
+ * negative delta.  Fold the restarts into a monotonic count. */
+static long mono_base; static int mono_last;
+static long mono_cycles(void)
+{
+    int now = cpu_cycles_run();
+    if (now < mono_last) mono_base += mono_last;
+    mono_last = now;
+    return mono_base + now;
+}
+
+static unsigned rtn_pcs[32]; static int rtn_count = -1;
+static struct { unsigned long sum; unsigned cnt; uint32_t sp; int active;
+                long entry_cyc; } rtn[32];
+
+static void rtn_hook(unsigned int pc)
+{
+    if (rtn_count < 0) {
+        rtn_count = 0;
+        const char *spec = getenv("SWIV_RTNCYC");
+        if (spec)
+            for (const char *p2 = spec; *p2 && rtn_count < 32; ) {
+                rtn_pcs[rtn_count++] = (unsigned)strtoul(p2, NULL, 16);
+                const char *c = strchr(p2, ','); if (!c) break; p2 = c + 1;
+            }
+    }
+    if (!rtn_count) return;
+    uint32_t sp = cpu_get_reg(CPU_REG_A7);
+    long now = mono_cycles();
+    for (int i = 0; i < rtn_count; i++) {
+        if (rtn[i].active && sp > rtn[i].sp) {      /* the rts popped */
+            long d = now - rtn[i].entry_cyc;
+            if (d > 0 && d < 1000000) { rtn[i].sum += (unsigned long)d; rtn[i].cnt++; }
+            rtn[i].active = 0;
+        }
+        if (!rtn[i].active && pc == rtn_pcs[i]) {
+            rtn[i].active = 1; rtn[i].sp = sp; rtn[i].entry_cyc = now;
+        }
+    }
+}
+
+void swiv_rtncyc_flush(void)
+{
+    if (rtn_count <= 0) return;
+    for (int i = 0; i < rtn_count; i++)
+        if (rtn[i].cnt)
+            fprintf(stderr, "rtncyc $%06x %lu cycles mean over %u calls\n",
+                    rtn_pcs[i], rtn[i].sum / rtn[i].cnt, rtn[i].cnt);
+}
+
 void swiv_instr_hook(unsigned int pc)
 {
     cycles_hook(pc);
+    rtn_hook(pc);
     if (recomp_trace_on) recomp_trace(pc);
     if (sfxlog_state) sfxlog_hook(pc);
     pc_history[pc_history_at] = pc;

@@ -16,6 +16,9 @@
 #include "m68krt.h"
 
 void lotus2_recomp_step(M68K *m);
+int  native_override_try(M68K *m);
+void native_overrides_init(int on);
+int  native_overrides_count(void);
 void swiv_instr_hook(unsigned int pc);
 
 static M68K cpu;
@@ -50,6 +53,13 @@ void m68krt_write(uint32_t addr, int size, uint32_t value)
 void cpu_init(void)
 {
     memset(&cpu, 0, sizeof cpu);
+    /* LOTUS2_NATIVE=0 puts the recompiled instructions back, so a swap
+     * can be compared against the code it replaced without rebuilding. */
+    const char *nv = getenv("LOTUS2_NATIVE");
+    native_overrides_init(nv ? atoi(nv) : 64);
+    if (native_overrides_count())
+        fprintf(stderr, "cpu_recomp: %d routines running native C\n",
+                native_overrides_count());
 
 }
 
@@ -109,7 +119,8 @@ int cpu_execute(int cycles)
         if (pending_irq && m68k_take_irq(&cpu, pending_irq))
             pending_irq = 0;
         swiv_instr_hook(cpu.pc);
-        lotus2_recomp_step(&cpu);
+        if (!native_override_try(&cpu))
+            lotus2_recomp_step(&cpu);
         steps_total++;
     }
     if (cpu.halted) {
