@@ -159,8 +159,21 @@ re/pipeline/pcset_race.txt: build/lotus2
 	SWIV_PCSET=$@ ./build/lotus2 --dir $(INSTALL) --frames 9000 \
 		--fire-from 2100 --fire-period 100 >/dev/null
 
+# $0723ba-$072670 is chip-RAM boot code that runs at frame 1 and is
+# overwritten later: only 4 of its 694 bytes still match the image the
+# disassembler sees, so translating it would be translating data.  Proven
+# by snapshotting chip RAM at the moment that pc executed, not assumed.
+RECOMP_EXCLUDE = --exclude 723ba-72670
 $(RECOMP_SRC): tools/m68k2c.py re/pipeline/pcset_race.txt build/dasm
-	python3 tools/m68k2c.py --pcset re/pipeline/pcset_race.txt --out $@
+	python3 tools/m68k2c.py --pcset re/pipeline/pcset_race.txt \
+		--range 200-390000 $(RECOMP_EXCLUDE) --out $@
+
+# Decode integrity: every pc the 68000 actually fetched from must be an
+# instruction boundary in our disassembly.  A linear sweep silently walks
+# jump tables and inline data as code and comes back into phase, which
+# compiles fine and is wrong; this is what catches that.
+decode-check: build/dasm re/pipeline/pcset_race.txt
+	python3 tools/decode_check.py
 
 build/recomp_verify: src/recomp/recomp_verify.c $(RECOMP_SRC) src/recomp/m68krt.h
 	mkdir -p build
@@ -194,4 +207,4 @@ test: selftest boot-test
 clean:
 	rm -rf build
 
-.PHONY: recomp recomp-gate statelog trace pcset drive all native boot-test selftest oracle test clean gate-capture road-capture render-gate view view-race track course
+.PHONY: decode-check recomp recomp-gate statelog trace pcset drive all native boot-test selftest oracle test clean gate-capture road-capture render-gate view view-race track course

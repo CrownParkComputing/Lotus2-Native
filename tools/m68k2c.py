@@ -212,7 +212,8 @@ def regref(i):
 
 # ------------------------------------------------------------ emission
 
-CC = {'ra': 't', 'eq': 'eq', 'ne': 'ne', 'cs': 'cs', 'cc': 'cc',
+def _cc_f(m): return 0
+CC = {'ra': 't', 'f': 'f', 'eq': 'eq', 'ne': 'ne', 'cs': 'cs', 'cc': 'cc',
       'mi': 'mi', 'pl': 'pl', 'vs': 'vs', 'vc': 'vc', 'hi': 'hi',
       'ls': 'ls', 'ge': 'ge', 'lt': 'lt', 'gt': 'gt', 'le': 'le',
       't': 't'}
@@ -489,6 +490,11 @@ def emit(ins):
                    % (v & 1, (v >> 1) & 1, (v >> 2) & 1, (v >> 3) & 1,
                       (v >> 4) & 1))
         return out
+    if m.startswith('s') and m[1:] in CC and len(lo) == 1:
+        # Scc: byte destination, 0xff when true, 0x00 when false
+        out.append('uint32_t r = m68k_cc_%s(m) ? 0xffu : 0x00u;' % CC[m[1:]])
+        if not write_op(lo[0], 1, 'r', out, 's'): raise Unsupported(m)
+        return out
     if m == 'nop':
         return ['(void)0;']
     raise Unsupported(m)
@@ -502,7 +508,7 @@ def emit_case(ins, known):
     if m == 'rts':
         return ['m->pc = m68k_pop32(m); break;']
     if m == 'rte':
-        return ['m->fault = "rte"; m->halted = 1; break;']
+        return ['m68k_rte(m); break;']
     if m in ('bsr', 'jsr'):
         t = lower(o[0])
         if t.kind == 'abs':
@@ -549,22 +555,88 @@ def emit_case(ins, known):
     body.append(nxt)
     return body
 
+def disassemble_at(image, pcs, window=0x800):
+    """Decode starting FROM each executed pc, restarting whenever a linear
+    sweep drifts off one.
+
+    A linear sweep treats jump tables and inline data as instructions and
+    silently comes back into phase a few bytes later, which produces code
+    that compiles and is wrong.  The oracle recorded every address the
+    68000 fetched from, so those addresses ARE the instruction boundaries:
+    sweep, and the moment the sweep fails to land on the next executed pc,
+    restart the sweep there.  Progress is guaranteed because the restart
+    address is always the first boundary of the new sweep.
+    """
+    todo = sorted(pcs)
+    found, i, guard = {}, 0, 0
+    while i < len(todo):
+        guard += 1
+        if guard > 4 * len(todo) + 1000:
+            raise SystemExit('decode did not converge')
+        start = todo[i]
+        text = subprocess.run(['./build/dasm', image, hex(start),
+                               hex(start + window)],
+                              capture_output=True, text=True).stdout
+        block, order = {}, []
+        for line in text.splitlines():
+            m = re.match(r'\$([0-9a-f]{6})', line)
+            if m:
+                a = int(m.group(1), 16)
+                block[a] = line.rstrip(); order.append(a)
+        order.sort()
+        nxt = {a: (order[k + 1] if k + 1 < len(order) else None)
+               for k, a in enumerate(order)}
+        limit = start + window - 32
+        progressed = False
+        while i < len(todo) and todo[i] in block and todo[i] < limit \
+                and nxt[todo[i]] is not None:
+            found[todo[i]] = (block[todo[i]], nxt[todo[i]] - todo[i])
+            i += 1; progressed = True
+        if not progressed and i < len(todo) and todo[i] in block \
+                and nxt[todo[i]] is None:
+            # single instruction at the very end of the window: widen once
+            text2 = subprocess.run(['./build/dasm', image, hex(todo[i]),
+                                    hex(todo[i] + 64)],
+                                   capture_output=True, text=True).stdout
+            ls = [l for l in text2.splitlines() if l.startswith('$')]
+            if len(ls) >= 2:
+                a0 = int(ls[0][1:7], 16); a1 = int(ls[1][1:7], 16)
+                found[todo[i]] = (ls[0].rstrip(), a1 - a0)
+                i += 1
+            else:
+                raise SystemExit('cannot decode $%06x' % todo[i])
+    return found
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--image', default='re/pipeline/combined.bin')
     ap.add_argument('--pcset', help='only translate PCs listed here')
     ap.add_argument('--range', default='20d000-217200')
     ap.add_argument('--out', default='src/recomp/lotus2_recomp.c')
+    ap.add_argument('--exclude', action='append', default=[],
+                    help='LO-HI region to leave untranslated (transient '
+                         'chip-RAM code whose image is not coherent with '
+                         'the moment it ran)')
     a = ap.parse_args()
 
     lo, hi = (int(x, 16) for x in a.range.split('-'))
-    text = subprocess.run(['./build/dasm', a.image, hex(lo), hex(hi)],
-                          capture_output=True, text=True).stdout
-    insns = parse(text.splitlines())
-    keep = None
-    if a.pcset:
-        keep = set(int(l.strip(), 16) for l in open(a.pcset) if l.strip())
-        insns = [i for i in insns if i.addr in keep]
+    if not a.pcset:
+        raise SystemExit('a pc set is required: it defines the decode')
+    keep = set(int(l.strip(), 16) for l in open(a.pcset) if l.strip())
+    keep = set(p for p in keep if lo <= p < hi)
+    for spec in a.exclude:
+        xlo, xhi = (int(x, 16) for x in spec.split('-'))
+        keep = set(p for p in keep if not (xlo <= p <= xhi))
+    decoded = disassemble_at(a.image, keep)
+    lines = []
+    for addr in sorted(decoded):
+        lines.append(decoded[addr][0])
+    insns = parse(lines)
+    # parse() infers length from the next listed address, which is wrong
+    # across a gap; take the real length from the decoder.
+    for ins in insns:
+        ins.length = decoded[ins.addr][1]
+        ins.next = ins.addr + ins.length
 
     known = set(i.addr for i in insns)
     cases, faults = [], 0

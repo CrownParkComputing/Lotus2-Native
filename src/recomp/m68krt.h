@@ -32,6 +32,8 @@ struct M68K {
     uint8_t *fast;              /* $200000.. */
     uint32_t chip_size, fast_size;
     uint16_t custom[256];       /* $dff000 writes land here */
+    uint16_t sr_hi;             /* SR bits above the CCR: S, interrupt mask */
+    int irq_level;              /* pending autovector level, 0 = none */
     int halted;
     const char *fault;          /* set when an unimplemented op is hit */
 };
@@ -137,6 +139,7 @@ static inline void m68k_cmp_flags(M68K *m, uint32_t s, uint32_t d, int sz)
 
 /* ---- condition tests ---- */
 static inline int m68k_cc_t (M68K *m) { (void)m; return 1; }
+static inline int m68k_cc_f (M68K *m) { (void)m; return 0; }
 static inline int m68k_cc_eq(M68K *m) { return m->z; }
 static inline int m68k_cc_ne(M68K *m) { return !m->z; }
 static inline int m68k_cc_cs(M68K *m) { return m->c; }
@@ -152,9 +155,48 @@ static inline int m68k_cc_lt(M68K *m) { return m->n != m->v; }
 static inline int m68k_cc_gt(M68K *m) { return (m->n == m->v) && !m->z; }
 static inline int m68k_cc_le(M68K *m) { return (m->n != m->v) || m->z; }
 
+/* ---- status register ---- */
+static inline uint16_t m68k_get_sr(const M68K *m)
+{
+    return (uint16_t)(m->sr_hi | (m->x << 4) | (m->n << 3) |
+                      (m->z << 2) | (m->v << 1) | m->c);
+}
+static inline void m68k_set_sr(M68K *m, uint16_t v)
+{
+    m->sr_hi = (uint16_t)(v & 0xffe0);
+    m->x = (v >> 4) & 1; m->n = (v >> 3) & 1;
+    m->z = (v >> 2) & 1; m->v = (v >> 1) & 1; m->c = v & 1;
+}
+
 static inline void m68k_push32(M68K *m, uint32_t v)
 { m->a[7] -= 4; m68k_wr(m, m->a[7], 4, v); }
 static inline uint32_t m68k_pop32(M68K *m)
 { uint32_t v = m68k_rd(m, m->a[7], 4); m->a[7] += 4; return v; }
+static inline void m68k_push16(M68K *m, uint16_t v)
+{ m->a[7] -= 2; m68k_wr(m, m->a[7], 2, v); }
+static inline uint16_t m68k_pop16(M68K *m)
+{ uint16_t v = (uint16_t)m68k_rd(m, m->a[7], 2); m->a[7] += 2; return v; }
+
+/* rte: the 68000 exception frame is SR then PC, pushed in that order. */
+static inline void m68k_rte(M68K *m)
+{
+    m68k_set_sr(m, m68k_pop16(m));
+    m->pc = m68k_pop32(m);
+}
+
+/* Take a pending autovectored interrupt.  Levels 2, 3 and 5 are the ones
+ * this game arms (L2 $20f5aa, L3 VERTB $20f6c0, L5 BLIT $20d91a); the
+ * vector is 24 + level, i.e. $68 / $6c / $74. */
+static inline int m68k_take_irq(M68K *m, int level)
+{
+    int mask = (m->sr_hi >> 8) & 7;
+    if (level != 7 && level <= mask) return 0;
+    uint16_t old = m68k_get_sr(m);
+    m->sr_hi = (uint16_t)((m->sr_hi & ~0x0700u) | 0x2000u | (level << 8));
+    m68k_push32(m, m->pc);
+    m68k_push16(m, old);
+    m->pc = m68k_rd(m, (uint32_t)(24 + level) * 4, 4);
+    return 1;
+}
 
 #endif
