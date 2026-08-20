@@ -124,7 +124,7 @@ void car_distance(Game *g, uint32_t view);     /* $212662 */
 void car_shape(Game *g, uint32_t view);        /* $212ba4 */
 void car_drive(Game *g, uint32_t view);        /* $212734 */
 void car_tick(Game *g, uint32_t view);         /* $21270a */
-void car_frame_latch(Game *g);                 /* $211dd4 */
+uint32_t car_frame_latch(Game *g);             /* $211dd4; returns A1 */
 void race_frame_begin(Game *g, uint16_t d0_in); /* $212cea */
 void race_frame_publish(Game *g);              /* $212e58 */
 void car_latch_gap(Game *g);                   /* glue: $211058 only */

@@ -203,6 +203,55 @@ static int verify_stage(const char *name, const char *entry_fast,
             bad++;
         }
     }
+    /* Registers the ORACLE changed but the port never declares.
+     *
+     * verify_stage only compares registers a stage announces with
+     * stage_expect, so a port that reproduces memory perfectly and leaves
+     * a register stale passes.  That is survivable while the port is only
+     * ever called from a test, and fatal the moment it replaces the real
+     * routine: road_blitqueue returns the blit-queue pointer in A4, the
+     * C port returns void, and the caller resumed on a stale A4 until an
+     * rts popped a corrupt address.  So: anything the routine changed and
+     * the port does not model is reported here, and a stage carrying such
+     * a register is not eligible to be a native override. */
+    int unmodelled = 0;
+    {
+        char ebuf[512];
+        snprintf(ebuf, sizeof ebuf, "%s", entry_fast);
+        char *et = strstr(ebuf, "_fast.bin");
+        char xbuf[512];
+        snprintf(xbuf, sizeof xbuf, "%s", exit_fast);
+        char *xt = strstr(xbuf, "_fast.bin");
+        if (et && xt) {
+            strcpy(et, ".regs");
+            strcpy(xt, ".regs");
+            uint32_t ein[16] = {0}, xout[16] = {0};
+            for (int pass = 0; pass < 2; pass++) {
+                FILE *rf = fopen(pass ? xbuf : ebuf, "r");
+                if (!rf) continue;
+                char k[32]; unsigned v;
+                while (fscanf(rf, "%31s %x", k, &v) == 2) {
+                    int idx = -1;
+                    if (k[0] == 'd' && k[1] >= '0' && k[1] <= '7' && !k[2])
+                        idx = k[1] - '0';
+                    else if (k[0] == 'a' && k[1] >= '0' && k[1] <= '7' && !k[2])
+                        idx = 8 + (k[1] - '0');
+                    if (idx >= 0) (pass ? xout : ein)[idx] = v;
+                }
+                fclose(rf);
+            }
+            for (int i = 0; i < 16; i++) {
+                if (i == 8 + 7 || i == 8 + 3) continue;  /* A7 stack, A3 base */
+                if (ein[i] != xout[i] && !stage_out_used[i]) {
+                    if (unmodelled++ == 0)
+                        fprintf(stderr, "  %s UNMODELLED registers:", name);
+                    fprintf(stderr, " %c%d", i < 8 ? 'd' : 'a', i & 7);
+                }
+            }
+            if (unmodelled) fprintf(stderr, "\n");
+        }
+    }
+
     /* register outputs vs the exit snapshot's regs */
     {
         char rbuf[512];
@@ -240,8 +289,9 @@ static int verify_stage(const char *name, const char *entry_fast,
                             want_chip[i]);
                 bad++;
             }
-    fprintf(stderr, "%s: %s (%ld bytes differ)\n", name,
-            bad ? "FAIL" : "EXACT", bad);
+    fprintf(stderr, "%s: %s (%ld bytes differ)%s\n", name,
+            bad ? "FAIL" : "EXACT", bad,
+            unmodelled ? "  [not override-eligible]" : "");
     free(g.fast);
     free(want);
     free(g.chip);
@@ -329,8 +379,28 @@ static void stage_span_fill(Game *g)
     stage_expect(8 + 2, s.a2); stage_expect(8 + 4, s.a4);
 }
 
+static void stage_frame_latch(Game *g)
+{ stage_expect(8 + 1, car_frame_latch(g)); }
+
 static void stage_shape_ptr(Game *g)
 { stage_expect(8 + 1, scen_shape_ptr(g, stage_a[1], stage_d[6])); }
+
+/* $216346 alone: the emit half, entered directly.  scen_project's own
+ * gate only ever exercised the shadow path, which is why its emit
+ * variants could be wrong and still pass. */
+static void stage_emit(Game *g)
+{
+    Span s = { stage_d[0], stage_d[1], stage_d[2], stage_d[3],
+               stage_d[4], stage_d[5], stage_d[6], stage_d[7],
+               stage_a[0], stage_a[1], stage_a[2], stage_a[4] };
+    scen_emit(g, &s);
+    stage_expect(0, s.d0); stage_expect(1, s.d1);
+    stage_expect(2, s.d2); stage_expect(3, s.d3);
+    stage_expect(4, s.d4); stage_expect(5, s.d5);
+    stage_expect(6, s.d6); stage_expect(7, s.d7);
+    stage_expect(8 + 0, s.a0); stage_expect(8 + 1, s.a1);
+    stage_expect(8 + 2, s.a2); stage_expect(8 + 4, s.a4);
+}
 
 /* $2160f2 -> $216346: project a scenery object and queue its blit. */
 static void stage_project(Game *g)
@@ -408,7 +478,7 @@ int main(int argc, char **argv)
             rc |= verify_stage("car_frame_latch",
                                "re/pipeline/road/lt_0_211948_fast.bin",
                                "re/pipeline/road/lt_1_21194c_fast.bin",
-                               car_frame_latch);
+                               stage_frame_latch);
             rc |= verify_stage("input_read",
                                "re/pipeline/road/in_0_21186a_fast.bin",
                                "re/pipeline/road/in_1_21186e_fast.bin",
@@ -437,6 +507,14 @@ int main(int argc, char **argv)
                                "re/pipeline/road/ph_5_211e94_fast.bin",
                                "re/pipeline/road/ph_6_211e98_fast.bin",
                                stage_tick);
+            rc |= verify_stage("scen_emit ($216346 via $215498)",
+                               "re/pipeline/road/em1_0_215498_fast.bin",
+                               "re/pipeline/road/em1_1_21549c_fast.bin",
+                               stage_emit);
+            rc |= verify_stage("scen_emit ($216346 via $2154bc)",
+                               "re/pipeline/road/em2_0_2154bc_fast.bin",
+                               "re/pipeline/road/em2_1_2154c0_fast.bin",
+                               stage_emit);
             rc |= verify_stage("scen_project ($2160f2+$216346)",
                                "re/pipeline/road/pj_0_215f00_fast.bin",
                                "re/pipeline/road/pj_1_215f04_fast.bin",

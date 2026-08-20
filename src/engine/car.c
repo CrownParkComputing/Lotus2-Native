@@ -544,7 +544,12 @@ void car_tick(Game *g, uint32_t a4)
  * record).  This is the first of the four stages that walk the car
  * position forward to $30d8 each frame.
  */
-void car_frame_latch(Game *g)
+/* Returns the final A1.  The original leaves the destination pointer
+ * advanced past the ten scenery records it copies, and a caller is
+ * entitled to use it; a port that returns void models the memory and
+ * loses the register, which is enough to disqualify it as a native
+ * override.  See tools/override_check.py. */
+uint32_t car_frame_latch(Game *g)
 {
     pf32(g, A3 + 0x30a2, f32(g, A3 + 0x3054));
     pf32(g, A3 + 0x30a6, f32(g, A3 + 0x3102));
@@ -570,6 +575,7 @@ void car_frame_latch(Game *g)
         pf16(g, a1, f16(g, a0)); a0 += 2; a1 += 2;
         a0 += 6;
     }
+    return a1;
 }
 
 /* car_latch_gap -- the ONE copy still without a ported home.

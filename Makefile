@@ -267,6 +267,14 @@ $(DECODE_IMAGE): tools/decode_image.py re/pipeline/combined.bin \
 		--region 723b0-72690=re/pipeline/boot/chip_0723ba.bin \
 		--region 204bf2-205a1e=re/pipeline/boot/fast_204bf2.bin --out $@
 
+# Which routines may be replaced by native C.  Two conditions: entered
+# only by BSR/JSR (this), and every register the original changes
+# reproduced by the port (make render-gate says "[not override-eligible]"
+# when not).  Both were learned by breaking the game.
+override-check: build/dasm $(DECODE_IMAGE)
+	python3 tools/override_check.py 21263c 211dd4 2169e0 2129f2 212680 \
+		212662 212ba4 21270a 215b58 215adc 2160f2 215a7a 215a9c 215b24
+
 coherence: build/lotus2 $(DECODE_IMAGE)
 	python3 tools/image_coherence.py
 
@@ -347,4 +355,4 @@ test: selftest boot-test
 clean:
 	rm -rf build
 
-.PHONY: frame-gate debug coherence play no-musashi decode-check recomp recomp-gate statelog trace pcset drive all native boot-test selftest oracle test clean gate-capture road-capture render-gate view view-race track course
+.PHONY: override-check frame-gate debug coherence play no-musashi decode-check recomp recomp-gate statelog trace pcset drive all native boot-test selftest oracle test clean gate-capture road-capture render-gate view view-race track course
