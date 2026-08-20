@@ -152,6 +152,25 @@ pcset: build/lotus2
 	./build/lotus2 --dir $(INSTALL) --frames 9000 \
 		--fire-from 2100 --fire-period 100 >/dev/null
 
+# ---- route A: static recompilation ----
+# tools/m68k2c.py translates every executed instruction to C mechanically.
+# Operand widths and register-write rules live in the generator and
+# src/recomp/m68krt.h, so they are uniform instead of re-derived per port.
+RECOMP_SRC = src/recomp/lotus2_recomp.c
+$(RECOMP_SRC): tools/m68k2c.py re/pipeline/pcset_race.txt build/dasm
+	python3 tools/m68k2c.py --pcset re/pipeline/pcset_race.txt --out $@
+
+build/recomp_verify: src/recomp/recomp_verify.c $(RECOMP_SRC) src/recomp/m68krt.h
+	mkdir -p build
+	$(CC) -O1 -std=c11 -w -Isrc/recomp -o $@ \
+		src/recomp/recomp_verify.c $(RECOMP_SRC)
+
+recomp: build/recomp_verify
+
+# Same snapshot pairs the hand-ports are gated on, applied to generated C.
+recomp-gate: build/recomp_verify
+	./tools/recomp_gate.sh
+
 native: build/lotus2
 
 # Short boot: the slave has to at least start executing after install + patch.
@@ -173,4 +192,4 @@ test: selftest boot-test
 clean:
 	rm -rf build
 
-.PHONY: statelog trace pcset drive all native boot-test selftest oracle test clean gate-capture road-capture render-gate view view-race track course
+.PHONY: recomp recomp-gate statelog trace pcset drive all native boot-test selftest oracle test clean gate-capture road-capture render-gate view view-race track course

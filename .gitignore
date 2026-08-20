@@ -14,6 +14,8 @@ re/pipeline/fast.bin
 re/pipeline/chip.bin
 re/pipeline/copper.txt
 re/pipeline/pcset.txt
+re/pipeline/pcset_race.txt
+src/recomp/lotus2_recomp.c
 re/pipeline/objlog.txt
 re/pipeline/disasm/
 re/pipeline/*.bin
