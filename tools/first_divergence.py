@@ -22,6 +22,11 @@ ap.add_argument('native')
 ap.add_argument('--image', default='re/pipeline/decode.bin')
 ap.add_argument('--context', type=int, default=6)
 ap.add_argument('--ignore-sr', action='store_true', default=True)
+ap.add_argument('--pc-only', action='store_true',
+                help='compare control flow only.  Register values legitimately '
+                     'differ wherever the game reads the beam position, so a '
+                     'full-register lockstep reports noise; the pc stream is '
+                     'the thing that must not diverge.')
 a = ap.parse_args()
 
 o, n = load(a.oracle), load(a.native)
@@ -30,7 +35,7 @@ lim = min(len(o), len(n))
 first = None
 for i in range(lim):
     ro, rn = o[i], n[i]
-    fields = range(0, 17)          # pc, D0-D7, A0-A7 (SR ignored by default)
+    fields = (0,) if a.pc_only else range(0, 17)
     if any(ro[k] != rn[k] for k in fields):
         first = i
         break

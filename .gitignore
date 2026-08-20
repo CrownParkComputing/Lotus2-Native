@@ -32,3 +32,4 @@ re/pipeline/statelog*.bin
 re/pipeline/pcset_race.txt
 re/pipeline/decode.bin
 re/pipeline/boot/
+re/pipeline/cycles.txt

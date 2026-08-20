@@ -22,15 +22,16 @@ static M68K cpu;
 static int pending_irq;
 static long steps_total;
 
-/* An instruction budget stands in for a cycle model.
+/* Real cycles, measured from the oracle.
  *
- * The generated code carries no cycle counts.  Rather than invent them,
- * the budget is CALIBRATED so the native build executes the same number
- * of instructions per frame as the oracle, and the frame gate decides
- * whether that is close enough.  Busy-wait loops (blitter-done, VPOS)
- * self-correct: they consume budget until the chipset moves on.
+ * Each generated instruction adds its own cost to m->cycles, so the CPU
+ * can be run against the same per-scanline cycle budget the chipset uses
+ * -- which is what keeps the beam-position reads, blitter waits and
+ * vblank handshakes landing where the game expects them.  The costs come
+ * from the oracle's own counter (SWIV_CYCLES), not from a timing manual:
+ * the reference frames were produced with those counts, so they are the
+ * right definition of correct here.
  */
-static int instr_per_line = 41;   /* calibrated: oracle instructions per frame */
 
 /* the generated code reaches memory through these */
 uint32_t m68krt_read(uint32_t addr, int size)
@@ -49,8 +50,7 @@ void m68krt_write(uint32_t addr, int size, uint32_t value)
 void cpu_init(void)
 {
     memset(&cpu, 0, sizeof cpu);
-    const char *e = getenv("LOTUS2_IPL");
-    if (e) instr_per_line = atoi(e);
+
 }
 
 void cpu_reset(void)
@@ -92,14 +92,22 @@ void cpu_set_reg(int r, unsigned int v)
  */
 static int timeslice_over;
 void cpu_end_timeslice(void) { timeslice_over = 1; }
-void cpu_recomp_set_ipl(int n) { instr_per_line = n; }
+
 long cpu_recomp_steps(void) { return steps_total; }
+int cpu_cycles_run(void) { return (int)(cpu.cycles - cpu.cycles_base); }
 
 int cpu_execute(int cycles)
 {
-    if (pending_irq && m68k_take_irq(&cpu, pending_irq)) pending_irq = 0;
     timeslice_over = 0;
-    for (int i = 0; i < instr_per_line && !cpu.halted && !timeslice_over; i++) {
+    unsigned long budget = cpu.cycles + (unsigned long)cycles;
+    cpu.cycles_base = cpu.cycles;
+    while (cpu.cycles < budget && !cpu.halted && !timeslice_over) {
+        /* Interrupts are taken at ANY instruction boundary, not once per
+         * scanline.  The music replay runs from the vblank handler, so
+         * deferring an interrupt to the start of the next line shifts its
+         * state and eventually sends it down a different branch. */
+        if (pending_irq && m68k_take_irq(&cpu, pending_irq))
+            pending_irq = 0;
         swiv_instr_hook(cpu.pc);
         lotus2_recomp_step(&cpu);
         steps_total++;

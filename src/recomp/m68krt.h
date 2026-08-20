@@ -32,6 +32,8 @@ struct M68K {
     uint8_t *fast;              /* $200000.. */
     uint32_t chip_size, fast_size;
     uint16_t custom[256];       /* $dff000 writes land here */
+    unsigned long cycles;       /* 68000 cycles consumed, measured not guessed */
+    unsigned long cycles_base;  /* value at the start of this timeslice */
     uint16_t sr_hi;             /* SR bits above the CCR: S, interrupt mask */
     int irq_level;              /* pending autovector level, 0 = none */
     int halted;
@@ -180,6 +182,8 @@ static inline int m68k_take_irq(M68K *m, int level)
     m68k_push32(m, m->pc);
     m68k_push16(m, old);
     m->pc = m68k_rd(m, (uint32_t)(24 + level) * 4, 4);
+    /* No explicit exception cost: the measured edge into the handler
+     * already contains it, and adding 44 here counts it twice. */
     return 1;
 }
 

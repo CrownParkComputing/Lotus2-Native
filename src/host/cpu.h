@@ -30,6 +30,8 @@ int  cpu_execute(int cycles);
 unsigned int cpu_disassemble(char *out, unsigned int pc);
 /* cut the current timeslice short (the slave uses it to yield) */
 void cpu_end_timeslice(void);
+/* cycles consumed so far in the current cpu_execute() call */
+int cpu_cycles_run(void);
 
 /* the host's memory layer, shared by both implementations */
 unsigned int m68k_read_memory_8(unsigned int address);

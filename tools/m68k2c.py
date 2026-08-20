@@ -356,6 +356,18 @@ def emit(ins):
     if m in ('mulu', 'muls'):
         s = src()
         r = lo[1].r
+        # data-dependent on the 68000, so charge the documented formula
+        # rather than an average: MULU 38 + 2 per set bit, MULS 38 + 2 per
+        # 0->1 or 1->0 transition in the source with a trailing zero.
+        out.append('{ uint16_t sw_ = (uint16_t)(%s); unsigned k_ = 0;' % s)
+        if m == 'mulu':
+            out.append('  for (int b_ = 0; b_ < 16; b_++) if ((sw_ >> b_) & 1) k_++;')
+        else:
+            out.append('  unsigned pv_ = 0;'
+                       ' for (int b_ = 0; b_ < 16; b_++)'
+                       ' { unsigned cb_ = (sw_ >> b_) & 1;'
+                       '   if (cb_ != pv_) k_++; pv_ = cb_; }')
+        out.append('  m->cycles += 38 + 2 * k_; }')
         if m == 'mulu':
             out.append('m->d[%d] = (uint32_t)((uint16_t)%s) * (uint32_t)(uint16_t)m->d[%d];'
                        % (r, s, r))
@@ -367,6 +379,7 @@ def emit(ins):
     if m in ('divu', 'divs'):
         s = src()
         r = lo[1].r
+        out.append('m->cycles += %d;' % (140 if m == 'divu' else 158))
         out.append('{ uint32_t dv = %s;' % s)
         out.append('  if (dv == 0) { m->fault = "divide by zero"; m->halted = 1; break; }')
         if m == 'divu':
@@ -533,7 +546,12 @@ def emit_case(ins, known):
         return out
     if m.startswith('b') and m[1:] in CC and m not in ('bset', 'bclr', 'bchg', 'btst'):
         t = lower(o[0])
-        return ['if (m68k_cc_%s(m)) { m->pc = 0x%x; break; }' % (CC[m[1:]], t.v & 0xffffff),
+        tgt = t.v & 0xffffff
+        # taken and not-taken cost different numbers of cycles; charge each
+        # its own measured edge rather than one rounded mean
+        return ['if (m68k_cc_%s(m)) { m->cycles += %d; m->pc = 0x%x; break; }'
+                % (CC[m[1:]], ins.cyc_taken, tgt),
+                'm->cycles += %d;' % ins.cyc_fall,
                 nxt]
     if m.startswith('db'):
         t = lower(o[1])
@@ -544,7 +562,9 @@ def emit_case(ins, known):
             pre = 'if (m68k_cc_%s(m)) { %s }\n        ' % (CC.get(cc, 't'), nxt)
         return [pre + '{ uint16_t cnt = (uint16_t)(m68k_trunc(m->d[%d], 2) - 1);' % r,
                 '  m68k_setd(m, %d, 2, cnt);' % r,
-                '  if (cnt != 0xffff) { m->pc = 0x%x; break; } }' % (t.v & 0xffffff),
+                '  if (cnt != 0xffff) { m->cycles += %d; m->pc = 0x%x; break; } }'
+                % (ins.cyc_taken, t.v & 0xffffff),
+                'm->cycles += %d;' % ins.cyc_fall,
                 nxt]
     try:
         body = emit(ins)
@@ -607,6 +627,8 @@ def disassemble_at(image, pcs, window=0x800):
                 raise SystemExit('cannot decode $%06x' % todo[i])
     return found
 
+COND = ('beq','bne','bcs','bcc','bmi','bpl','bvs','bvc','bhi','bls',
+        'bge','blt','bgt','ble')
 BRANCHY = ('bra','bsr','jmp','jsr','beq','bne','bcs','bcc','bmi','bpl',
            'bvs','bvc','bhi','bls','bge','blt','bgt','ble','dbra','dbf',
            'dbeq','dbne','dbcs','dbcc','dbmi','dbpl','dbhi','dbls','dbge',
@@ -628,6 +650,8 @@ def descend(image, seeds, ranges, decoded):
         return any(lo <= a < hi for lo, hi in ranges)
     work = [a for a in seeds if in_range(a)]
     seen = set()
+    cache = {}
+    conflicts = []
     added = 0
     while work:
         pc = work.pop()
@@ -635,11 +659,22 @@ def descend(image, seeds, ranges, decoded):
             continue
         if pc in decoded:
             text, length = decoded[pc]
+        elif pc in cache:
+            text, length = cache[pc]
         else:
-            got = disassemble_at(image, [pc])
-            if pc not in got:
+            # Decode a window forward from this verified point and keep
+            # the whole sequential chain: every address in it is an
+            # instruction boundary GIVEN this anchor.  If another chain
+            # later disagrees about an address, that is a genuine
+            # ambiguity and is reported rather than silently resolved.
+            win = disassemble_at(image, [pc], window=0x200)
+            if pc not in win:
                 continue
-            text, length = got[pc]
+            for k, v in win.items():
+                if k in cache and cache[k][0] != v[0]:
+                    conflicts.append(k)
+                cache[k] = v
+            text, length = cache[pc]
         m = re.match(r'\$[0-9a-f]{6}\s+(\S+)\s*(.*)', text)
         if not m:
             continue
@@ -660,6 +695,11 @@ def descend(image, seeds, ranges, decoded):
                         work.append(tgt)
         if mnem not in STOPS:
             work.append(pc + length)
+    if conflicts:
+        sys.stderr.write('m68k2c: %d addresses decoded two different ways '
+                         'by different chains (first $%06x) -- ambiguous, '
+                         'left to the anchored decode\n'
+                         % (len(conflicts), conflicts[0]))
     return added
 
 def main():
@@ -668,6 +708,10 @@ def main():
     ap.add_argument('--pcset', help='only translate PCs listed here')
     ap.add_argument('--range', default='20d000-217200')
     ap.add_argument('--out', default='src/recomp/lotus2_recomp.c')
+    ap.add_argument('--cycles', default='re/pipeline/cycles.txt',
+                    help='measured per-pc cycle costs from the oracle '
+                         '(SWIV_CYCLES); instructions the trace never ran '
+                         'get a cost learned from the ones it did')
     ap.add_argument('--descend', action='store_true',
                     help='extend the decode by recursive descent from the '
                          'executed pcs, so untaken paths are translated too')
@@ -689,15 +733,12 @@ def main():
         keep = set(p for p in keep if not (xlo <= p <= xhi))
     decoded = disassemble_at(a.image, keep)
     if a.descend:
-        ranges = []
-        prev = None
-        for p in sorted(keep):
-            if prev is None or p - prev > 0x400:
-                ranges.append([p, p + 2])
-            else:
-                ranges[-1][1] = p + 2
-            prev = p
-        ranges = [(lo, hi + a.descend_pad) for lo, hi in ranges]
+        # Descent may follow a static branch anywhere in the translated
+        # range.  Confining it to the traced regions is what left the
+        # build halting two bytes outside one of them; the safety comes
+        # from starting only at verified boundaries and stopping at
+        # anything that does not decode, not from an address window.
+        ranges = [(lo, hi)]
         n = descend(a.image, sorted(keep), ranges, decoded)
         sys.stderr.write('m68k2c: recursive descent added %d instructions '
                          'the trace never reached\n' % n)
@@ -711,6 +752,60 @@ def main():
         ins.length = decoded[ins.addr][1]
         ins.next = ins.addr + ins.length
 
+    # ---- cycle costs -------------------------------------------------
+    # Measured, not transcribed from a timing manual: the oracle's own
+    # counts are what produced the reference frames, so they are the right
+    # source of truth.  Recursive descent reaches instructions the trace
+    # never ran, and those get the mean cost of the measured instructions
+    # sharing their shape (mnemonic, size, operand kinds).
+    edges = {}
+    measured = {}
+    try:
+        for line in open(a.cycles):
+            pc, nxt, n = line.split()
+            edges[(int(pc, 16), int(nxt, 16))] = int(n)
+        # a per-pc fallback for instructions with only one outcome seen
+        agg = {}
+        for (pc, _n), c in edges.items():
+            agg.setdefault(pc, []).append(c)
+        measured = {pc: (sum(v) + len(v) // 2) // len(v)
+                    for pc, v in agg.items()}
+    except OSError:
+        sys.stderr.write('m68k2c: no cycle measurements (%s); pacing will '
+                         'be wrong\n' % a.cycles)
+
+    def shape(ins):
+        return (ins.mnem, ins.size,
+                tuple(lower(o).kind for o in ins.ops))
+
+    learn = {}
+    for ins in insns:
+        if ins.addr in measured:
+            learn.setdefault(shape(ins), []).append(measured[ins.addr])
+    table = {k: (sum(v) + len(v) // 2) // len(v) for k, v in learn.items()}
+    default = 8
+    guessed = 0
+    for ins in insns:
+        if ins.addr in measured:
+            ins.cycles = measured[ins.addr]
+        else:
+            ins.cycles = table.get(shape(ins), default)
+            guessed += 1
+        # per-edge costs for the two-way instructions
+        ins.cyc_taken = ins.cyc_fall = 0
+        base = ins.mnem
+        if base in ('mulu', 'muls', 'divu', 'divs'):
+            # charged by the emitted formula instead, so the measured
+            # mean must not also be charged
+            ins.cycles = 0
+        if (base in COND or base.startswith('db')) and ins.ops:
+            tgt = lower(ins.ops[-1])
+            t = edges.get((ins.addr, tgt.v & 0xffffff)) if tgt.kind == 'abs' else None
+            f = edges.get((ins.addr, ins.next))
+            ins.cyc_taken = t if t is not None else ins.cycles
+            ins.cyc_fall = f if f is not None else ins.cycles
+            ins.cycles = 0          # charged on the branch paths instead
+
     known = set(i.addr for i in insns)
     cases, faults = [], 0
     for ins in insns:
@@ -718,8 +813,9 @@ def main():
         if any('m->fault =' in b and 'divide' not in b for b in body):
             faults += 1
         # each case gets its own block: the temporaries are per-instruction
-        cases.append('    case 0x%06x: {  /* %s */\n%s\n    }'
+        cases.append('    case 0x%06x: {  /* %s */\n        m->cycles += %d;\n%s\n    }'
                      % (ins.addr, ins.text.split(None, 1)[1].strip(),
+                        ins.cycles,
                         '\n'.join('        ' + b for b in body)))
 
     with open(a.out, 'w') as f:
@@ -747,8 +843,10 @@ def main():
                 '    while (!m->halted && m->pc != stop_pc)\n'
                 '        lotus2_recomp_step(m);\n'
                 '}\n')
-    sys.stderr.write('m68k2c: %d instructions, %d untranslated -> %s\n'
-                     % (len(insns), faults, a.out))
+    sys.stderr.write('m68k2c: %d instructions, %d untranslated, '
+                     '%d cycle costs measured / %d learned -> %s\n'
+                     % (len(insns), faults, len(insns) - guessed, guessed,
+                        a.out))
 
 if __name__ == '__main__':
     main()

@@ -1628,8 +1628,11 @@ static void recomp_trace(unsigned int pc)
         if (--statelog_left == 0) { fclose(statelog); statelog = NULL; }
     }
 }
+void swiv_cycles_flush(void);
+
 void swiv_recomp_trace_flush(void)
 {
+    swiv_cycles_flush();
     if (sfxlog) { fclose(sfxlog); sfxlog = NULL; }
     if (pcset_bits) {
         FILE *f = fopen(getenv("SWIV_PCSET"), "w");
@@ -1682,8 +1685,83 @@ static void sfxlog_hook(unsigned int pc)
         }
 }
 
+/* SWIV_CYCLES=path: measure how many cycles each pc costs.
+ *
+ * A static recompilation has no notion of time, and inventing one from a
+ * timing manual would be a guess about the very thing the reference
+ * frames were produced with.  The oracle already knows exactly: sample
+ * the cycle counter at each instruction and the delta is the cost of the
+ * PREVIOUS one.  Conditional branches and dbra differ between taken and
+ * untaken, so the mean over every execution is recorded.
+ */
+static int cyclog_state = -1;
+static unsigned cyc_last_pc;
+static int cyc_last;
+
+/* Costs are keyed by EDGE (pc -> next pc), not by pc.
+ *
+ * A conditional branch costs a different number of cycles taken than not
+ * taken, and a per-pc mean rounds that difference away.  Averaged over a
+ * frame the error is well under one percent, which still accumulates
+ * into a whole frame of drift over a few thousand frames and eventually
+ * sends the game down a different path.  Keyed by edge, each outcome
+ * carries its own measured cost and nothing is averaged.
+ */
+#define CYC_SLOTS (1u << 21)
+static struct { uint64_t key; unsigned sum, cnt; } *cyc_tab;
+
+static unsigned cyc_slot(uint64_t key)
+{
+    unsigned h = (unsigned)((key * 0x9E3779B97F4A7C15ull) >> 43) % CYC_SLOTS;
+    for (unsigned i = 0; i < CYC_SLOTS; i++) {
+        unsigned j = (h + i) % CYC_SLOTS;
+        if (cyc_tab[j].cnt == 0 || cyc_tab[j].key == key) {
+            cyc_tab[j].key = key;
+            return j;
+        }
+    }
+    return 0;
+}
+
+void swiv_cycles_flush(void)
+{
+    if (!cyc_tab) return;
+    const char *path = getenv("SWIV_CYCLES");
+    FILE *f = path ? fopen(path, "w") : NULL;
+    if (f) {
+        for (unsigned j = 0; j < CYC_SLOTS; j++)
+            if (cyc_tab[j].cnt)
+                fprintf(f, "%06x %06x %u\n",
+                        (unsigned)(cyc_tab[j].key >> 24) & 0xffffff,
+                        (unsigned)(cyc_tab[j].key & 0xffffff),
+                        (cyc_tab[j].sum + cyc_tab[j].cnt / 2) /
+                        cyc_tab[j].cnt);
+        fclose(f);
+    }
+}
+
+static void cycles_hook(unsigned int pc)
+{
+    if (cyclog_state < 0) {
+        cyclog_state = getenv("SWIV_CYCLES") ? 1 : 0;
+        if (cyclog_state) cyc_tab = calloc(CYC_SLOTS, sizeof *cyc_tab);
+    }
+    if (!cyclog_state) return;
+    int now = cpu_cycles_run();
+    int delta = now - cyc_last;
+    if (delta > 0 && delta < 256 && cyc_last_pc) {
+        uint64_t key = ((uint64_t)cyc_last_pc << 24) | (pc & 0xffffff);
+        unsigned j = cyc_slot(key);
+        cyc_tab[j].sum += (unsigned)delta;
+        cyc_tab[j].cnt++;
+    }
+    cyc_last = now;
+    cyc_last_pc = pc;
+}
+
 void swiv_instr_hook(unsigned int pc)
 {
+    cycles_hook(pc);
     if (recomp_trace_on) recomp_trace(pc);
     if (sfxlog_state) sfxlog_hook(pc);
     pc_history[pc_history_at] = pc;

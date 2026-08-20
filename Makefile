@@ -207,8 +207,17 @@ $(DECODE_IMAGE): tools/decode_image.py re/pipeline/combined.bin \
 	python3 tools/decode_image.py --base re/pipeline/combined.bin \
 		--region 723b0-72690=re/pipeline/boot/chip_0723ba.bin --out $@
 
+# Per-EDGE cycle costs measured from the oracle's own counter.  Keyed by
+# (pc -> next pc) rather than by pc, because a conditional branch costs a
+# different number of cycles taken than not taken and a per-pc mean rounds
+# that away -- worth 0.6% drift per frame, which is a whole frame every
+# few thousand.
+re/pipeline/cycles.txt: build/lotus2
+	SWIV_CYCLES=$@ ./build/lotus2 --dir $(INSTALL) --frames 9000 \
+		--fire-from 2100 --fire-period 100 >/dev/null 2>&1
+
 $(RECOMP_SRC): tools/m68k2c.py re/pipeline/pcset_race.txt build/dasm \
-		$(DECODE_IMAGE)
+		re/pipeline/cycles.txt $(DECODE_IMAGE)
 	python3 tools/m68k2c.py --image $(DECODE_IMAGE) \
 		--pcset re/pipeline/pcset_race.txt --range 200-390000 \
 		--descend --out $@

@@ -25,3 +25,4 @@ int cpu_execute(int cycles) { return m68k_execute(cycles); }
 unsigned int cpu_disassemble(char *out, unsigned int pc)
 { return m68k_disassemble(out, pc, M68K_CPU_TYPE_68000); }
 void cpu_end_timeslice(void) { m68k_end_timeslice(); }
+int cpu_cycles_run(void) { return m68k_cycles_run(); }
