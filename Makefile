@@ -101,8 +101,10 @@ build/lotus2_game: src/host/lotus2_game.c $(HOST) $(HOST_H) \
 		$(HOST) src/host/pad.c src/host/cpu_recomp.c $(NATIVE_OVR) \
 		build/lotus2_recomp.o $(RAYLIB_FLAGS)
 
+RECORD ?=
 play: build/lotus2_game
-	./build/lotus2_game --dir $(INSTALL)
+	./build/lotus2_game --dir $(INSTALL) \
+		$(if $(RECORD),--record $(RECORD))
 
 # Play with the debug pages one keypress away: 1 GAME, 2 COURSE,
 # 3 TRACK, 4 GEOM, 5 DISPLAY; F5 freezes the emulation to read state.
@@ -324,15 +326,27 @@ recomp-gate: build/recomp_verify
 # frames be identical.  FRAMES/EVERY override the window.
 FRAMES ?= 30000
 EVERY  ?= 1000
+INPUT  ?= --fire-from 2100 --fire-period 100
 frame-gate: build/lotus2 build/lotus2_recomp
 	@rm -rf build/fg_o build/fg_n && mkdir -p build/fg_o build/fg_n
-	./build/lotus2 --dir $(INSTALL) --frames $(FRAMES) \
-		--fire-from 2100 --fire-period 100 \
+	./build/lotus2 --dir $(INSTALL) --frames $(FRAMES) $(INPUT) \
 		--ppm-seq build/fg_o/f --ppm-every $(EVERY) >/dev/null 2>&1
-	./build/lotus2_recomp --dir $(INSTALL) --frames $(FRAMES) \
-		--fire-from 2100 --fire-period 100 \
+	./build/lotus2_recomp --dir $(INSTALL) --frames $(FRAMES) $(INPUT) \
 		--ppm-seq build/fg_n/f --ppm-every $(EVERY) >/dev/null 2>&1
 	@python3 tools/frame_gate.py build/fg_o build/fg_n
+
+# Record a play session, then judge the native build against the oracle on
+# exactly the input a person gave it.  Scripted fire cannot get past a
+# password screen, so this is the only route to courses 2-8:
+#
+#   make play RECORD=my.rec          # play, reach the course, quit
+#   make replay-gate REC=my.rec      # oracle vs native on that session
+REC ?= build/session.rec
+replay-gate: build/lotus2 build/lotus2_recomp
+	@test -f $(REC) || { echo "no recording at $(REC); make play RECORD=..."; exit 2; }
+	@$(MAKE) --no-print-directory frame-gate \
+		FRAMES=$$(stat -c%s $(REC)) EVERY=$(EVERY) \
+		INPUT="--replay $(REC)"
 
 native: build/lotus2
 
@@ -355,4 +369,4 @@ test: selftest boot-test
 clean:
 	rm -rf build
 
-.PHONY: override-check frame-gate debug coherence play no-musashi decode-check recomp recomp-gate statelog trace pcset drive all native boot-test selftest oracle test clean gate-capture road-capture render-gate view view-race track course
+.PHONY: replay-gate override-check frame-gate debug coherence play no-musashi decode-check recomp recomp-gate statelog trace pcset drive all native boot-test selftest oracle test clean gate-capture road-capture render-gate view view-race track course

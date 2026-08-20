@@ -28,13 +28,14 @@ int main(int argc, char **argv)
                       .slave = "Lotus2CD32.slave" };
     int scale = 3, fullscreen = 0;
     long shot_at = -1; const char *shot_path = NULL;
-    const char *wav_path = NULL;
+    const char *wav_path = NULL, *rec_path = NULL;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--dir") && i + 1 < argc) whd.dir = argv[++i];
         else if (!strcmp(argv[i], "--slave") && i + 1 < argc) whd.slave = argv[++i];
         else if (!strcmp(argv[i], "--scale") && i + 1 < argc) scale = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--fullscreen")) fullscreen = 1;
         else if (!strcmp(argv[i], "--wav") && i + 1 < argc) wav_path = argv[++i];
+        else if (!strcmp(argv[i], "--record") && i + 1 < argc) rec_path = argv[++i];
         else if (!strcmp(argv[i], "--shot") && i + 2 < argc) {
             shot_at = strtol(argv[++i], NULL, 0);
             shot_path = argv[++i];
@@ -79,6 +80,11 @@ int main(int argc, char **argv)
     /* --wav writes the mixed stereo stream as raw s16le, so "is there
      * sound?" is a question with an answer rather than a listening test. */
     FILE *wav = wav_path ? fopen(wav_path, "wb") : NULL;
+    /* --record writes one input byte per frame.  Automated input cannot
+     * get past a password screen, so the only way to reach courses 2-8 is
+     * for a person to play there -- and a recording turns that play into
+     * a reproducible test the oracle can be run against. */
+    FILE *rec = rec_path ? fopen(rec_path, "wb") : NULL;
 
     while (!WindowShouldClose() && !amiga_stopped()) {
         if (IsKeyPressed(KEY_P)) paused = !paused;
@@ -91,6 +97,7 @@ int main(int argc, char **argv)
              * the near car and port 0 for the menus */
             uint8_t stick = keyboard_stick(true) | gamepad_stick(0);
             joy_state[0] = joy_state[1] = stick;
+            if (rec) fputc(stick, rec);
             amiga_run_frame();
             /* Paula is mixed into the host's ring here; without this call
              * the ring stays empty and amiga_audio_pull dutifully returns
@@ -135,6 +142,8 @@ int main(int argc, char **argv)
         EndDrawing();
     }
 
+    if (rec) { fprintf(stderr, "lotus2_game: recorded %ld frames of input "
+                       "to %s\n", swiv_frame_no, rec_path); fclose(rec); }
     if (wav) fclose(wav);
     UnloadAudioStream(stream);
     CloseAudioDevice();

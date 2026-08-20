@@ -143,6 +143,8 @@ int main(int argc, char **argv)
     };
     long frames = 600;
     long video_from = 0;
+    const char *replay_path = NULL;
+    FILE *replay = NULL;
     long fire_from = -1, fire_period = 0;
     long expect_disk_loads = 0, expect_blits = 0;
     const char *ppm = NULL, *ppm_seq = NULL;
@@ -158,6 +160,8 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--video-from") && i + 1 < argc)
             video_from = number(argv[++i]);
         else if (!strcmp(argv[i], "--no-video")) video_from = -1;
+        else if (!strcmp(argv[i], "--replay") && i + 1 < argc)
+            replay_path = argv[++i];
         else if (!strcmp(argv[i], "--fire-from") && i + 1 < argc)
             fire_from = number(argv[++i]);
         else if (!strcmp(argv[i], "--fire-period") && i + 1 < argc)
@@ -224,13 +228,23 @@ int main(int argc, char **argv)
 
     amiga_init();
     if (!whdload_boot(&whd)) return 1;
+    if (replay_path) {
+        replay = fopen(replay_path, "rb");
+        if (!replay) { perror(replay_path); return 1; }
+        fprintf(stderr, "lotus2: replaying input from %s\n", replay_path);
+    }
     amiga_enable_video(video_from == 0);
 
     long last_loads = -1;
     while (swiv_frame_no < frames && !amiga_stopped()) {
         if (video_from > 0 && swiv_frame_no == video_from)
             amiga_enable_video(true);
-        if (fire_from >= 0 && swiv_frame_no >= fire_from) {
+        if (replay) {
+            /* one recorded byte per frame; past the end, hands off */
+            int b = fgetc(replay);
+            joy_state[0] = joy_state[1] = (b == EOF) ? 0 : (uint8_t)b;
+        }
+        else if (fire_from >= 0 && swiv_frame_no >= fire_from) {
             joy_state[1] = fire_period
                 ? (((swiv_frame_no / fire_period) % 2) ? 0x10 : 0x00)
                 : 0x10;
