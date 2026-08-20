@@ -18,6 +18,35 @@
 
 void lotus2_recomp_run(M68K *m, uint32_t stop_pc);
 
+/* the gate's memory: flat snapshot images, custom registers inert */
+static M68K *g_m;
+uint32_t m68krt_read(uint32_t a, int sz)
+{
+    M68K *m = g_m;
+    if ((a & 0xfff000u) == 0xdff000u) return m->custom[(a & 0x1fe) >> 1];
+    uint8_t *p = a < m->chip_size ? m->chip + a
+               : (a >= 0x200000u && a < 0x200000u + m->fast_size)
+                 ? m->fast + (a - 0x200000u) : 0;
+    if (!p) return 0;
+    if (sz == 1) return p[0];
+    if (sz == 2) return ((uint32_t)p[0] << 8) | p[1];
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+           ((uint32_t)p[2] << 8) | p[3];
+}
+void m68krt_write(uint32_t a, int sz, uint32_t v)
+{
+    M68K *m = g_m;
+    if ((a & 0xfff000u) == 0xdff000u) { m->custom[(a & 0x1fe) >> 1] = (uint16_t)v; return; }
+    uint8_t *p = a < m->chip_size ? m->chip + a
+               : (a >= 0x200000u && a < 0x200000u + m->fast_size)
+                 ? m->fast + (a - 0x200000u) : 0;
+    if (!p) return;
+    if (sz == 1) { p[0] = (uint8_t)v; return; }
+    if (sz == 2) { p[0] = (uint8_t)(v >> 8); p[1] = (uint8_t)v; return; }
+    p[0] = (uint8_t)(v >> 24); p[1] = (uint8_t)(v >> 16);
+    p[2] = (uint8_t)(v >> 8);  p[3] = (uint8_t)v;
+}
+
 static uint8_t *load(const char *path, size_t want)
 {
     FILE *f = fopen(path, "rb");
@@ -69,6 +98,7 @@ int main(int argc, char **argv)
     m.chip = load_side(ep, "chip", CHIP);
     m.fast = load_side(ep, "fast", FAST);
     m.chip_size = CHIP; m.fast_size = FAST;
+    g_m = &m;
     if (!m.chip || !m.fast) return 1;
     for (int i = 0; i < 8; i++) { m.d[i] = er.d[i]; m.a[i] = er.a[i]; }
     m.pc = er.pc;

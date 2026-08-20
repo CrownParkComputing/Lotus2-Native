@@ -10,8 +10,8 @@
  * why the chipset here is title-neutral: nothing in this file knows anything
  * about SWIV. */
 #include "amiga.h"
+#include "cpu.h"
 #include "whdload.h"
-#include "m68k.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -213,7 +213,7 @@ static void irq_update(void)
             if ((active & (1u << bit)) && level[bit] > active_level)
                 active_level = level[bit];
     }
-    m68k_set_irq(active_level);
+    cpu_set_irq(active_level);
 }
 
 static uint16_t minterm(uint8_t function, uint16_t a, uint16_t b, uint16_t c)
@@ -397,7 +397,7 @@ static void trace_input(const char *what, uint32_t value)
     if (!getenv("SWIV_TRACE_INPUT")) return;
     static uint32_t seen[64];
     static int count;
-    uint32_t pc = m68k_get_reg(NULL, M68K_REG_PPC);
+    uint32_t pc = cpu_get_reg(CPU_REG_PPC);
     for (int i = 0; i < count; i++)
         if (seen[i] == pc) return;
     if (count < 64) seen[count++] = pc;
@@ -481,8 +481,8 @@ static void custom_write(uint32_t reg, uint16_t value)
     case 0x070: bltdat[2] = value; break;
     case 0x072: bltdat[1] = value; break;
     case 0x074: bltdat[0] = value; break;
-    case 0x080: cop1lc = (cop1lc & 0xffff) | ((uint32_t)value << 16); if (getenv("SWIV_TRACE_COP1")) fprintf(stderr, "COP1LCH=%04x pc=%06x frame %ld\n", value, m68k_get_reg(NULL, M68K_REG_PC), swiv_frame_no); break;
-    case 0x082: cop1lc = (cop1lc & 0xffff0000) | (value & 0xfffe); if (getenv("SWIV_TRACE_COP1")) fprintf(stderr, "COP1LCL=%04x pc=%06x frame %ld\n", value, m68k_get_reg(NULL, M68K_REG_PC), swiv_frame_no); break;
+    case 0x080: cop1lc = (cop1lc & 0xffff) | ((uint32_t)value << 16); if (getenv("SWIV_TRACE_COP1")) fprintf(stderr, "COP1LCH=%04x pc=%06x frame %ld\n", value, cpu_get_reg(CPU_REG_PC), swiv_frame_no); break;
+    case 0x082: cop1lc = (cop1lc & 0xffff0000) | (value & 0xfffe); if (getenv("SWIV_TRACE_COP1")) fprintf(stderr, "COP1LCL=%04x pc=%06x frame %ld\n", value, cpu_get_reg(CPU_REG_PC), swiv_frame_no); break;
     case 0x084: cop2lc = (cop2lc & 0xffff) | ((uint32_t)value << 16); break;
     case 0x086: cop2lc = (cop2lc & 0xffff0000) | (value & 0xfffe); break;
     case 0x088: copper_jump1(); break;
@@ -571,7 +571,7 @@ static void custom_write(uint32_t reg, uint16_t value)
                 fprintf(stderr, "line %3d %s COLOR%02d = $%03x pc=$%06x\n",
                         cur_line, in_copper ? "COPPER" : "cpu   ",
                         (reg - 0x180) / 2, value & 0xfff,
-                        in_copper ? 0 : m68k_get_reg(NULL, M68K_REG_PC));
+                        in_copper ? 0 : cpu_get_reg(CPU_REG_PC));
             {
                 uint8_t index = (uint8_t)((reg - 0x180) / 2);
                 uint16_t rgb = value & 0x0fff;
@@ -1367,7 +1367,7 @@ static int watch_count = -1;
 static void watch_hit(uint32_t address, int is_write, int size)
 {
     static uint32_t seen[4096]; static int seen_count;
-    uint32_t pc = m68k_get_reg(NULL, M68K_REG_PPC);
+    uint32_t pc = cpu_get_reg(CPU_REG_PPC);
     uint32_t key = pc | (is_write ? 0x80000000u : 0);
     for (int i = 0; i < seen_count; i++) if (seen[i] == key) return;
     if (seen_count < 4096) seen[seen_count++] = key;
@@ -1480,7 +1480,7 @@ void amiga_pc_history(void)
         uint32_t pc = pc_history[(pc_history_at + i) % PC_HISTORY];
         if (!pc) continue;
         char text[128];
-        m68k_disassemble(text, pc, M68K_CPU_TYPE_68000);
+        cpu_disassemble(text, pc);
         fprintf(stderr, "  $%06x  %s\n", pc, text);
     }
 }
@@ -1517,11 +1517,11 @@ static void snapshot_take(unsigned int pc)
         fprintf(f, "frame %ld\npc %06x\n", swiv_frame_no, pc);
         for (int i = 0; i < 8; i++)
             fprintf(f, "d%d %08x\n", i,
-                    m68k_get_reg(NULL, M68K_REG_D0 + i));
+                    cpu_get_reg(CPU_REG_D0 + i));
         for (int i = 0; i < 8; i++)
             fprintf(f, "a%d %08x\n", i,
-                    m68k_get_reg(NULL, M68K_REG_A0 + i));
-        fprintf(f, "sr %04x\n", m68k_get_reg(NULL, M68K_REG_SR));
+                    cpu_get_reg(CPU_REG_A0 + i));
+        fprintf(f, "sr %04x\n", cpu_get_reg(CPU_REG_SR));
         /* Custom-chip state a native port cannot recover from RAM: the
          * blitter's control words, masks, modulos and channel pointers,
          * plus the live palette.  Without these a native blit cannot be
@@ -1577,6 +1577,14 @@ static void snapshot_take(unsigned int pc)
     snap_taken++;
 }
 
+/* Record a pc in the executed-pc set WITHOUT the snapshot/statelog side
+ * effects, for addresses the instruction hook never sees. */
+static void recomp_trace_pc_only(unsigned int pc)
+{
+    if (pcset_bits && pc < (1u << 24))
+        pcset_bits[pc >> 3] |= 1u << (pc & 7);
+}
+
 static void recomp_trace(unsigned int pc)
 {
     if (recomp_trace_on < 0) {
@@ -1613,9 +1621,9 @@ static void recomp_trace(unsigned int pc)
         swiv_frame_no >= (getenv("SWIV_STATELOG_FROM") ? atol(getenv("SWIV_STATELOG_FROM")) : 0)) {
         uint32_t rec[18];
         rec[0] = pc;
-        for (int i = 0; i < 8; i++) rec[1 + i] = m68k_get_reg(NULL, M68K_REG_D0 + i);
-        for (int i = 0; i < 8; i++) rec[9 + i] = m68k_get_reg(NULL, M68K_REG_A0 + i);
-        rec[17] = m68k_get_reg(NULL, M68K_REG_SR);
+        for (int i = 0; i < 8; i++) rec[1 + i] = cpu_get_reg(CPU_REG_D0 + i);
+        for (int i = 0; i < 8; i++) rec[9 + i] = cpu_get_reg(CPU_REG_A0 + i);
+        rec[17] = cpu_get_reg(CPU_REG_SR);
         fwrite(rec, sizeof rec, 1, statelog);
         if (--statelog_left == 0) { fclose(statelog); statelog = NULL; }
     }
@@ -1657,19 +1665,19 @@ static void sfxlog_hook(unsigned int pc)
     if (!sfxlog || pc < 0x2107dc + 16 || pc > 0x211340 + 16) return;
     if (pc == 0x2107dc + 16) { fprintf(sfxlog, "T %ld\n", swiv_frame_no); return; }
     if (pc == 0x2108ea + 16) {
-        unsigned a1 = m68k_get_reg(NULL, M68K_REG_A1);
+        unsigned a1 = cpu_get_reg(CPU_REG_A1);
         unsigned base = m68k_read_memory_32(0x2016DC + 10786);
         fprintf(sfxlog, "S %ld %u %04x %04x %04x %06x\n", swiv_frame_no,
-                (a1 - base) / 268, m68k_get_reg(NULL, M68K_REG_D0) & 0xffff,
-                m68k_get_reg(NULL, M68K_REG_D1) & 0xffff,
-                m68k_get_reg(NULL, M68K_REG_D2) & 0xffff,
-                m68k_get_reg(NULL, M68K_REG_A0) - 16);
+                (a1 - base) / 268, cpu_get_reg(CPU_REG_D0) & 0xffff,
+                cpu_get_reg(CPU_REG_D1) & 0xffff,
+                cpu_get_reg(CPU_REG_D2) & 0xffff,
+                cpu_get_reg(CPU_REG_A0) - 16);
         return;
     }
     for (int i = 0; sfx_entry_pcs[i]; i++)
         if (pc == sfx_entry_pcs[i] + 16) {
             fprintf(sfxlog, "E %ld %06x %04x\n", swiv_frame_no, pc - 16,
-                    m68k_get_reg(NULL, M68K_REG_D0) & 0xffff);
+                    cpu_get_reg(CPU_REG_D0) & 0xffff);
             return;
         }
 }
@@ -1683,7 +1691,16 @@ void swiv_instr_hook(unsigned int pc)
     /* Every resload entry point is a distinct address in a table no 68000
      * code occupies, so servicing WHDLoad is a PC comparison and needs no
      * stub code in emulated memory. */
-    if (whdload_trap(pc)) return;
+    if (whdload_trap(pc)) {
+        /* The hook fires once per executed instruction.  When it changes
+         * the pc -- which servicing a resload call always does -- the
+         * instruction at the NEW pc runs without a second hook call, so
+         * it never reaches the executed-pc set.  Every instruction after
+         * a resload return would then be missing from a recompilation
+         * built off that set.  Record it explicitly. */
+        if (recomp_trace_on) recomp_trace_pc_only(cpu_get_reg(CPU_REG_PC));
+        return;
+    }
     if (pc_hook) pc_hook(pc);
 }
 
@@ -1734,7 +1751,7 @@ void amiga_run_frame(void)
         memcpy(render_bplpt, bplpt, sizeof(render_bplpt));
         if (video_enabled && (dmacon & 0x0280) == 0x0280)
             copper_run_line(cur_line);
-        m68k_execute(CYCLES_PER_LINE);
+        cpu_execute(CYCLES_PER_LINE);
         ciab_tick();
         if (video_enabled) {
             render_line(cur_line);
@@ -1757,8 +1774,8 @@ bool amiga_stopped(void) { return stopped; }
 void amiga_report(void)
 {
     char instruction[128];
-    unsigned pc = m68k_get_reg(NULL, M68K_REG_PC);
-    m68k_disassemble(instruction, pc, M68K_CPU_TYPE_68000);
+    unsigned pc = cpu_get_reg(CPU_REG_PC);
+    cpu_disassemble(instruction, pc);
     fprintf(stderr,
             "native: frames=%ld pc=$%06x files=%ld blits=%ld audio=%ld "
             "energy=%llu copper=%ld pixels=%ld dmacon=$%04x "
@@ -1830,9 +1847,8 @@ void amiga_init(void)
         swiv_playfield_shift = atoi(getenv("SWIV_PLAYFIELD_SHIFT"));
     /* ws_Flags has WHDLF_ClearMem set, so both RAM regions start at zero. */
     memset(fast, 0, sizeof fast);
-    m68k_init();
-    m68k_set_cpu_type(M68K_CPU_TYPE_68000);
-    m68k_pulse_reset();
+    cpu_init();
+    cpu_reset();
 }
 
 void amiga_set_pc_hook(SwivPcHook hook) { pc_hook = hook; }
@@ -1875,9 +1891,9 @@ void amiga_display_state(uint16_t *out_bplcon0, uint16_t *out_dmacon,
 /* Return from a hooked subroutine as if it had run and RTS'd. */
 void amiga_return_from_hook(void)
 {
-    uint32_t stack = m68k_get_reg(NULL, M68K_REG_A7);
-    m68k_set_reg(M68K_REG_A7, stack + 4);
-    m68k_set_reg(M68K_REG_PC, rl(stack));
+    uint32_t stack = cpu_get_reg(CPU_REG_A7);
+    cpu_set_reg(CPU_REG_A7, stack + 4);
+    cpu_set_reg(CPU_REG_PC, rl(stack));
 }
 
 void amiga_enable_video(bool enabled)

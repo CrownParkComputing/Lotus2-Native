@@ -1,6 +1,6 @@
 #include "amiga.h"
 #include "whdload.h"
-#include "m68k.h"
+#include "cpu.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -590,12 +590,12 @@ bool whdload_trap(uint32_t pc)
         return false;
 
     uint32_t offset = pc - WHD_RESLOAD_BASE;
-    uint32_t d0 = m68k_get_reg(NULL, M68K_REG_D0);
-    uint32_t d1 = m68k_get_reg(NULL, M68K_REG_D1);
-    uint32_t d2 = m68k_get_reg(NULL, M68K_REG_D2);
-    uint32_t a0 = m68k_get_reg(NULL, M68K_REG_A0);
-    uint32_t a1 = m68k_get_reg(NULL, M68K_REG_A1);
-    uint32_t stack = m68k_get_reg(NULL, M68K_REG_A7);
+    uint32_t d0 = cpu_get_reg(CPU_REG_D0);
+    uint32_t d1 = cpu_get_reg(CPU_REG_D1);
+    uint32_t d2 = cpu_get_reg(CPU_REG_D2);
+    uint32_t a0 = cpu_get_reg(CPU_REG_A0);
+    uint32_t a1 = cpu_get_reg(CPU_REG_A1);
+    uint32_t stack = cpu_get_reg(CPU_REG_A7);
     uint32_t result = 0;
     whd_call_count++;
 
@@ -610,8 +610,8 @@ bool whdload_trap(uint32_t pc)
         amiga_stop();
         /* Abort never returns.  Park the CPU on the abort entry so the rest
          * of the frame does not walk into the table behind it. */
-        m68k_set_reg(M68K_REG_PC, WHD_RESLOAD_BASE + WHD_ABORT);
-        m68k_end_timeslice();
+        cpu_set_reg(CPU_REG_PC, WHD_RESLOAD_BASE + WHD_ABORT);
+        cpu_end_timeslice();
         return true;
     }
     case WHD_LOADFILE:
@@ -631,7 +631,7 @@ bool whdload_trap(uint32_t pc)
                     a0, a1);
             amiga_pc_history();
             amiga_stop();
-            m68k_end_timeslice();
+            cpu_end_timeslice();
             return true;
         }
         uint32_t out_size = 0;
@@ -640,7 +640,7 @@ bool whdload_trap(uint32_t pc)
             fprintf(stderr, "whdload: Decrunch: source $%06x not in RAM\n", a0);
             amiga_pc_history();
             amiga_stop();
-            m68k_end_timeslice();
+            cpu_end_timeslice();
             return true;
         }
         uint32_t unpacked = ((uint32_t)src[4] << 24) |
@@ -655,7 +655,7 @@ bool whdload_trap(uint32_t pc)
                     a1, unpacked);
             amiga_pc_history();
             amiga_stop();
-            m68k_end_timeslice();
+            cpu_end_timeslice();
             return true;
         }
         const uint8_t *full_src = amiga_ram(a0, 18 + packed);
@@ -664,7 +664,7 @@ bool whdload_trap(uint32_t pc)
                     "in RAM\n", a0, packed);
             amiga_pc_history();
             amiga_stop();
-            m68k_end_timeslice();
+            cpu_end_timeslice();
             return true;
         }
         int rc = rnc2_unpack(full_src, dst, &out_size);
@@ -680,7 +680,7 @@ bool whdload_trap(uint32_t pc)
                     rc);
             amiga_pc_history();
             amiga_stop();
-            m68k_end_timeslice();
+            cpu_end_timeslice();
             return true;
         }
         break;
@@ -730,14 +730,14 @@ bool whdload_trap(uint32_t pc)
                 "(d0=$%x d1=$%x a0=$%06x a1=$%06x)\n", offset, d0, d1, a0, a1);
         amiga_pc_history();
         amiga_stop();
-        m68k_end_timeslice();
+        cpu_end_timeslice();
         return true;
     }
 
     /* Return to the caller: pop the return address the JSR pushed. */
-    m68k_set_reg(M68K_REG_A7, stack + 4);
-    m68k_set_reg(M68K_REG_PC, rd(stack, 4));
-    m68k_set_reg(M68K_REG_D0, result);
+    cpu_set_reg(CPU_REG_A7, stack + 4);
+    cpu_set_reg(CPU_REG_PC, rd(stack, 4));
+    cpu_set_reg(CPU_REG_D0, result);
     return true;
 }
 
@@ -896,10 +896,10 @@ bool whdload_boot(const WhdConfig *requested)
      * with a plausible-looking pointer. */
     wr(4, 0xf0000001u, 4);
 
-    m68k_set_reg(M68K_REG_A0, WHD_RESLOAD_BASE);
-    m68k_set_reg(M68K_REG_A7, WHD_STACK_TOP);
-    m68k_set_reg(M68K_REG_SR, 0x2000);      /* supervisor, interrupts open */
-    m68k_set_reg(M68K_REG_PC, entry);
+    cpu_set_reg(CPU_REG_A0, WHD_RESLOAD_BASE);
+    cpu_set_reg(CPU_REG_A7, WHD_STACK_TOP);
+    cpu_set_reg(CPU_REG_SR, 0x2000);      /* supervisor, interrupts open */
+    cpu_set_reg(CPU_REG_PC, entry);
     active = true;
     return true;
 }

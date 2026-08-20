@@ -38,38 +38,22 @@ struct M68K {
     const char *fault;          /* set when an unimplemented op is hit */
 };
 
-/* ---- memory ---- */
-static inline uint8_t *m68k_host(M68K *m, uint32_t a)
-{
-    if (a < m->chip_size) return m->chip + a;
-    if (a >= 0x200000u && a < 0x200000u + m->fast_size)
-        return m->fast + (a - 0x200000u);
-    return NULL;
-}
+/* ---- memory ----
+ *
+ * Generated code never touches memory directly: it goes through these two
+ * hooks, which the surrounding program provides.  In the native build
+ * they forward to the host's chipset layer, so a write to a custom
+ * register still starts a blit or fetches a copper instruction.  In
+ * recomp_verify they forward to flat snapshot images.  Same generated
+ * code, judged the same way, in both.
+ */
+uint32_t m68krt_read(uint32_t addr, int size);
+void     m68krt_write(uint32_t addr, int size, uint32_t value);
+
 static inline uint32_t m68k_rd(M68K *m, uint32_t a, int sz)
-{
-    if ((a & 0xfff000u) == 0xdff000u)
-        return m->custom[(a & 0x1fe) >> 1];
-    uint8_t *p = m68k_host(m, a);
-    if (!p) return 0;
-    if (sz == 1) return p[0];
-    if (sz == 2) return ((uint32_t)p[0] << 8) | p[1];
-    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
-           ((uint32_t)p[2] << 8) | p[3];
-}
+{ (void)m; return m68krt_read(a, sz); }
 static inline void m68k_wr(M68K *m, uint32_t a, int sz, uint32_t v)
-{
-    if ((a & 0xfff000u) == 0xdff000u) {
-        m->custom[(a & 0x1fe) >> 1] = (uint16_t)v;
-        return;
-    }
-    uint8_t *p = m68k_host(m, a);
-    if (!p) return;
-    if (sz == 1) { p[0] = (uint8_t)v; return; }
-    if (sz == 2) { p[0] = (uint8_t)(v >> 8); p[1] = (uint8_t)v; return; }
-    p[0] = (uint8_t)(v >> 24); p[1] = (uint8_t)(v >> 16);
-    p[2] = (uint8_t)(v >> 8);  p[3] = (uint8_t)v;
-}
+{ (void)m; m68krt_write(a, sz, v); }
 
 /* ---- register writes at each width ---- */
 static inline void m68k_setd(M68K *m, int r, int sz, uint32_t v)

@@ -607,12 +607,72 @@ def disassemble_at(image, pcs, window=0x800):
                 raise SystemExit('cannot decode $%06x' % todo[i])
     return found
 
+BRANCHY = ('bra','bsr','jmp','jsr','beq','bne','bcs','bcc','bmi','bpl',
+           'bvs','bvc','bhi','bls','bge','blt','bgt','ble','dbra','dbf',
+           'dbeq','dbne','dbcs','dbcc','dbmi','dbpl','dbhi','dbls','dbge',
+           'dblt','dbgt','dble')
+STOPS = ('rts','rte','rtr','jmp','bra')
+
+def descend(image, seeds, ranges, decoded):
+    """Extend the decode by recursive descent from known-good anchors.
+
+    The executed-pc set only covers paths one trace happened to take, so a
+    build made from it halts the first time the game does something new --
+    a different music pattern, an unvisited menu.  Every executed pc is a
+    verified instruction boundary, though, so they are safe seeds: decode
+    forward from each, follow static branch and call targets, and stop at
+    rts/rte and at anything that does not decode.  That reaches code the
+    trace never ran WITHOUT the phase errors a linear sweep makes.
+    """
+    def in_range(a):
+        return any(lo <= a < hi for lo, hi in ranges)
+    work = [a for a in seeds if in_range(a)]
+    seen = set()
+    added = 0
+    while work:
+        pc = work.pop()
+        if pc in seen or not in_range(pc):
+            continue
+        if pc in decoded:
+            text, length = decoded[pc]
+        else:
+            got = disassemble_at(image, [pc])
+            if pc not in got:
+                continue
+            text, length = got[pc]
+        m = re.match(r'\$[0-9a-f]{6}\s+(\S+)\s*(.*)', text)
+        if not m:
+            continue
+        mnem = m.group(1).split('.')[0]
+        if mnem == 'dc':                 # not an instruction: stop this path
+            continue
+        seen.add(pc)
+        if pc not in decoded:
+            decoded[pc] = (text, length)
+            added += 1
+        rest = m.group(2).split(';')[0]
+        if mnem in BRANCHY:
+            for tok in split_operands(rest):
+                t = ABS.match(tok.strip())
+                if t:
+                    tgt = num(t.group(1)) & 0xffffff
+                    if in_range(tgt) and tgt not in seen:
+                        work.append(tgt)
+        if mnem not in STOPS:
+            work.append(pc + length)
+    return added
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--image', default='re/pipeline/combined.bin')
     ap.add_argument('--pcset', help='only translate PCs listed here')
     ap.add_argument('--range', default='20d000-217200')
     ap.add_argument('--out', default='src/recomp/lotus2_recomp.c')
+    ap.add_argument('--descend', action='store_true',
+                    help='extend the decode by recursive descent from the '
+                         'executed pcs, so untaken paths are translated too')
+    ap.add_argument('--descend-pad', type=lambda x: int(x, 16), default=0x400,
+                    help='how far past a traced region descent may go')
     ap.add_argument('--exclude', action='append', default=[],
                     help='LO-HI region to leave untranslated (transient '
                          'chip-RAM code whose image is not coherent with '
@@ -628,6 +688,19 @@ def main():
         xlo, xhi = (int(x, 16) for x in spec.split('-'))
         keep = set(p for p in keep if not (xlo <= p <= xhi))
     decoded = disassemble_at(a.image, keep)
+    if a.descend:
+        ranges = []
+        prev = None
+        for p in sorted(keep):
+            if prev is None or p - prev > 0x400:
+                ranges.append([p, p + 2])
+            else:
+                ranges[-1][1] = p + 2
+            prev = p
+        ranges = [(lo, hi + a.descend_pad) for lo, hi in ranges]
+        n = descend(a.image, sorted(keep), ranges, decoded)
+        sys.stderr.write('m68k2c: recursive descent added %d instructions '
+                         'the trace never reached\n' % n)
     lines = []
     for addr in sorted(decoded):
         lines.append(decoded[addr][0])
@@ -658,15 +731,22 @@ def main():
                 ' * across every routine instead of re-derived per hand-port.\n'
                 ' */\n' % (len(insns), a.pcset or 'all PCs', lo, hi))
         f.write('#include "m68krt.h"\n\n')
-        f.write('void lotus2_recomp_run(M68K *m, uint32_t stop_pc)\n{\n')
-        f.write('    while (!m->halted && m->pc != stop_pc) {\n')
+        f.write('/* one instruction per call: the loop belongs to the\n'
+                ' * caller, which is the host frame driver in the native\n'
+                ' * build and a stop-pc loop in the gate. */\n')
+        f.write('void lotus2_recomp_step(M68K *m)\n{\n')
         f.write('    switch (m->pc) {\n')
         f.write('\n'.join(cases))
         f.write('\n    default:\n'
                 '        m->fault = "untranslated pc";\n'
                 '        m->halted = 1;\n'
                 '        break;\n'
-                '    }\n    }\n}\n')
+                '    }\n}\n\n'
+                'void lotus2_recomp_run(M68K *m, uint32_t stop_pc)\n'
+                '{\n'
+                '    while (!m->halted && m->pc != stop_pc)\n'
+                '        lotus2_recomp_step(m);\n'
+                '}\n')
     sys.stderr.write('m68k2c: %d instructions, %d untranslated -> %s\n'
                      % (len(insns), faults, a.out))
 

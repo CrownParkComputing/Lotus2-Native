@@ -14,8 +14,8 @@
  * image the way WHDLoad's imager does).
  */
 #include "amiga.h"
+#include "cpu.h"
 #include "whdload.h"
-#include "m68k.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -255,7 +255,7 @@ int main(int argc, char **argv)
             amiga_display_state(&bplcon0, &dmacon, &diwstrt, &diwstop);
             fprintf(stderr, "frame %5ld pc=$%06x loads=%ld blits=%ld "
                     "bplcon0=$%04x dmacon=$%04x diw=$%04x-$%04x pixels=%ld\n",
-                    swiv_frame_no, m68k_get_reg(NULL, M68K_REG_PC),
+                    swiv_frame_no, cpu_get_reg(CPU_REG_PC),
                     whd_disk_loads, swiv_blit_count, bplcon0, dmacon,
                     diwstrt, diwstop, swiv_nonblack_pixels);
             last_loads = whd_disk_loads;

@@ -29,9 +29,30 @@ def regions(pcs, gap=0x400):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--image', default='re/pipeline/combined.bin')
+    ap.add_argument('--image', default='re/pipeline/decode.bin')
     ap.add_argument('--pcset', default='re/pipeline/pcset_race.txt')
+    ap.add_argument('--linear', action='store_true',
+                    help='test a naive linear sweep instead of the '
+                         'generator\'s decode -- shows what the sweep '
+                         'would get wrong')
     a = ap.parse_args()
+    if not a.linear:
+        sys.path.insert(0, 'tools')
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('m', 'tools/m68k2c.py')
+        m = importlib.util.module_from_spec(spec)
+        import sys as _s
+        argv, _s.argv = _s.argv, ['m68k2c']
+        spec.loader.exec_module(m)
+        _s.argv = argv
+        pcs = sorted(int(l.strip(), 16) for l in open(a.pcset) if l.strip())
+        got = m.disassemble_at(a.image, pcs)
+        missing = [p for p in pcs if p not in got]
+        print("generator decode: %d pcs, %d without an instruction"
+              % (len(pcs), len(missing)))
+        for p in missing[:8]:
+            print("  $%06x" % p)
+        return 1 if missing else 0
     pcs = sorted(int(l.strip(), 16) for l in open(a.pcset) if l.strip())
     bad_total = 0
     print("%-22s %7s %7s  %s" % ("region", "PCs", "off-bnd", "verdict"))
