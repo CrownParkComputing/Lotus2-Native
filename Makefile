@@ -305,6 +305,20 @@ recomp: build/recomp_verify
 recomp-gate: build/recomp_verify
 	./tools/recomp_gate.sh
 
+# The whole-game gate: run oracle and native side by side and demand the
+# frames be identical.  FRAMES/EVERY override the window.
+FRAMES ?= 30000
+EVERY  ?= 1000
+frame-gate: build/lotus2 build/lotus2_recomp
+	@rm -rf build/fg_o build/fg_n && mkdir -p build/fg_o build/fg_n
+	./build/lotus2 --dir $(INSTALL) --frames $(FRAMES) \
+		--fire-from 2100 --fire-period 100 \
+		--ppm-seq build/fg_o/f --ppm-every $(EVERY) >/dev/null 2>&1
+	./build/lotus2_recomp --dir $(INSTALL) --frames $(FRAMES) \
+		--fire-from 2100 --fire-period 100 \
+		--ppm-seq build/fg_n/f --ppm-every $(EVERY) >/dev/null 2>&1
+	@python3 tools/frame_gate.py build/fg_o build/fg_n
+
 native: build/lotus2
 
 # Short boot: the slave has to at least start executing after install + patch.
@@ -326,4 +340,4 @@ test: selftest boot-test
 clean:
 	rm -rf build
 
-.PHONY: debug coherence play no-musashi decode-check recomp recomp-gate statelog trace pcset drive all native boot-test selftest oracle test clean gate-capture road-capture render-gate view view-race track course
+.PHONY: frame-gate debug coherence play no-musashi decode-check recomp recomp-gate statelog trace pcset drive all native boot-test selftest oracle test clean gate-capture road-capture render-gate view view-race track course
