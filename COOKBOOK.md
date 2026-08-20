@@ -650,16 +650,30 @@ return a flag, not void.
 Below the head the graph layers cleanly, which gives the porting order
 (bottom-up, each tier gateable once the tier under it is done):
 
-    tier 0 (leaves, call nothing)   $216aca $216b50 $2162dc $216310
-                                    $215dac $2148b0 $21495a $214994
-    tier 1                          $2169e0
-    tier 2                          $2160f2  $216346
+    tier 0 (leaves, call nothing)   $216aca $216b50 $215dac   [DONE]
+                                    $2162dc $216310            (not on FOREST)
+    tier 1                          $2169e0                    [DONE]
+    tier 2                          $2160f2 -> $216346         <- NEXT
     tier 3                          $215dce  $215ea2
     tier 4 (thin dispatchers)       $215bca/$215bd2  $215c32  $215c60
                                     $215d1e  $2159fa
     tier 5                          $214798 $2147b6 $2147de $214810
                                     $2148b2 $2148da $214914  -> $215906
     tier 6                          the merge loop $2151de-$2152b8
+
+CORRECTION to the tier table: `$2160f2` and `$216346` are not two
+independent functions.  Both are `bsr` targets in their own right, but
+`$2160f2` also *falls through* into `$216346` (via `beq $216346` at
+`$21623c` and `bra $216346` at `$2162d8`), and `$215dce` branches into
+`$2160f2` the same way.  They are entry points into a shared tail, so
+they have to be ported as one unit with three doors, not stacked as
+tiers.  The closure tool cannot see that -- only reading them does.
+
+The snapshot pair for that unit is already captured:
+`pj_0_215f00` -> `pj_1_215f04` (frame 3378, the course-select screen).
+Its exit registers are identical to the `span_fill` gate's exit, which
+is a nice independent confirmation that the chain really does terminate
+in the emitters already ported.
 
 `$216aca` and `$216b50` are blit-queue emitters: they append four-plane
 records to the queue at A4 that `road_blitqueue` already consumes, type
@@ -716,8 +730,11 @@ CAVEAT: one course, one run.  Before calling any of the 15 dead, re-run
 
 What is genuinely left, in dependency order:
 
-* **11 scenery functions** for a playable FOREST course (see the PC-set
-  triage above), in the tier order above; 16 more for the other modes.
+* **7 scenery functions** left for a playable FOREST course: the
+  `$2160f2`/`$216346` unit, `$215dce`, `$215ea2`, the thin dispatchers
+  `$215bca/$215bd2` `$215c32` `$215d1e`, and the merge loop.  Four of
+  the original eleven are done (`$2169e0` `$216aca` `$216b50` `$215dac`).
+  16 more routines cover the other courses' scenery modes.
 * **The scenery / car-sprite / HUD draw passes.**  Until these land the
   drive demo shows a road with no trees, signs, opponents or dashboard,
   and `race_frame_begin` has to stay gated off (rotating the triple
