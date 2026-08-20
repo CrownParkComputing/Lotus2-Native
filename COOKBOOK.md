@@ -653,7 +653,8 @@ Below the head the graph layers cleanly, which gives the porting order
     tier 0 (leaves, call nothing)   $216aca $216b50 $215dac   [DONE]
                                     $2162dc $216310            (not on FOREST)
     tier 1                          $2169e0                    [DONE]
-    tier 2                          $2160f2 -> $216346         <- NEXT
+    tier 2                          $2160f2 -> $216346         [DONE]
+                                    (+ $216812/$216916 shadow)
     tier 3                          $215dce  $215ea2
     tier 4 (thin dispatchers)       $215bca/$215bd2  $215c32  $215c60
                                     $215d1e  $2159fa
@@ -685,6 +686,30 @@ The merge loop at `$2151de` picks the nearest of three iterator streams
 (`$2f32`/`$2f34`/`$2f38`), draws it, advances that stream with the
 already-ported iterator, and loops — so tier 6 is small once tiers 0-5
 land.
+
+### three register traps the memory check cannot see (2026-08-20)
+
+`scen_project` ($2160f2) came out with ZERO memory differences and three
+wrong registers.  Every one was a write the port simply did not model:
+
+* **`move.l A4,D0` overwrites D0 completely** -- and the very next
+  instruction tests it (`sub.l`, then `cmp.l #$1cac`).  A port that
+  writes only the guard condition and not D0 computes the right answer
+  and leaves the wrong register.
+* **Every `lea` writes its address register.**  `lea (-$4048,A3),A0` is
+  not a C constant; it is a store, and the LAST such store before the
+  routine returns is what the gate compares.  Table base addresses used
+  as literals in the port are the commonest version of this bug.
+* **`move.b (A0,D7.w),D7` writes ONE byte of D7**, leaving the upper
+  three untouched, and the following `andi.w #$ff,D7` only clears up to
+  the word.  A word-sized model of that instruction is wrong in the top
+  half.
+
+The lesson generalises: the memory gate proves the routine's effect on
+the world, the register gate proves its effect on the machine, and only
+the second one catches a port that got the right answer by the wrong
+route.  Always declare every register a routine touches via
+`stage_expect`, not just the ones that look like return values.
 
 ### two tools that change the cost of the rest (2026-08-20)
 
@@ -730,11 +755,11 @@ CAVEAT: one course, one run.  Before calling any of the 15 dead, re-run
 
 What is genuinely left, in dependency order:
 
-* **7 scenery functions** left for a playable FOREST course: the
-  `$2160f2`/`$216346` unit, `$215dce`, `$215ea2`, the thin dispatchers
-  `$215bca/$215bd2` `$215c32` `$215d1e`, and the merge loop.  Four of
-  the original eleven are done (`$2169e0` `$216aca` `$216b50` `$215dac`).
-  16 more routines cover the other courses' scenery modes.
+* **5 scenery pieces** left for a playable FOREST course: `$215dce`,
+  `$215ea2`, the thin dispatchers `$215bca/$215bd2` `$215c32` `$215d1e`,
+  and the merge loop `$2151de-$2152b8`.  Done so far: `$21508a`
+  `$2169e0` `$216aca` `$216b50` `$215dac` `$2160f2` `$216346` `$216812`
+  `$216916`.  16 more routines cover the other courses' scenery modes.
 * **The scenery / car-sprite / HUD draw passes.**  Until these land the
   drive demo shows a road with no trees, signs, opponents or dashboard,
   and `race_frame_begin` has to stay gated off (rotating the triple
