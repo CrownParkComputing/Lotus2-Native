@@ -28,11 +28,13 @@ int main(int argc, char **argv)
                       .slave = "Lotus2CD32.slave" };
     int scale = 3, fullscreen = 0;
     long shot_at = -1; const char *shot_path = NULL;
+    const char *wav_path = NULL;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--dir") && i + 1 < argc) whd.dir = argv[++i];
         else if (!strcmp(argv[i], "--slave") && i + 1 < argc) whd.slave = argv[++i];
         else if (!strcmp(argv[i], "--scale") && i + 1 < argc) scale = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--fullscreen")) fullscreen = 1;
+        else if (!strcmp(argv[i], "--wav") && i + 1 < argc) wav_path = argv[++i];
         else if (!strcmp(argv[i], "--shot") && i + 2 < argc) {
             shot_at = strtol(argv[++i], NULL, 0);
             shot_path = argv[++i];
@@ -62,6 +64,10 @@ int main(int argc, char **argv)
     if (fullscreen) ToggleFullscreen();
     SetTargetFPS(50);
     InitAudioDevice();
+    /* One buffer per video frame.  raylib's default stream buffer is far
+     * larger than 882 frames, and UpdateAudioStream writes whatever it is
+     * given into a buffer sized for something else. */
+    SetAudioStreamBufferSizeDefault(FRAME_SAMPLES);
     AudioStream stream = LoadAudioStream(AUDIO_RATE, 16, 2);
     PlayAudioStream(stream);
 
@@ -70,6 +76,9 @@ int main(int argc, char **argv)
     Texture2D screen = LoadTextureFromImage(image);
     static int16_t mix[FRAME_SAMPLES * 2];
     int paused = 0;
+    /* --wav writes the mixed stereo stream as raw s16le, so "is there
+     * sound?" is a question with an answer rather than a listening test. */
+    FILE *wav = wav_path ? fopen(wav_path, "wb") : NULL;
 
     while (!WindowShouldClose() && !amiga_stopped()) {
         if (IsKeyPressed(KEY_P)) paused = !paused;
@@ -83,9 +92,16 @@ int main(int argc, char **argv)
             uint8_t stick = keyboard_stick(true) | gamepad_stick(0);
             joy_state[0] = joy_state[1] = stick;
             amiga_run_frame();
+            /* Paula is mixed into the host's ring here; without this call
+             * the ring stays empty and amiga_audio_pull dutifully returns
+             * silence, which looks exactly like working audio from the
+             * chipset's side -- channels on, periods and volumes set, and
+             * nothing coming out. */
+            amiga_audio_frame();
             if (IsAudioStreamProcessed(stream)) {
-                int n = amiga_audio_pull(mix, FRAME_SAMPLES);
-                if (n > 0) UpdateAudioStream(stream, mix, n);
+                amiga_audio_pull(mix, FRAME_SAMPLES);   /* zero-fills short */
+                UpdateAudioStream(stream, mix, FRAME_SAMPLES);
+                if (wav) fwrite(mix, sizeof(int16_t), FRAME_SAMPLES * 2, wav);
             }
         }
 
@@ -119,6 +135,7 @@ int main(int argc, char **argv)
         EndDrawing();
     }
 
+    if (wav) fclose(wav);
     UnloadAudioStream(stream);
     CloseAudioDevice();
     CloseWindow();
