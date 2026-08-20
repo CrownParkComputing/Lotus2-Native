@@ -623,11 +623,59 @@ DONE and byte-exact — the engine now carries its own blitter model
 (`src/engine/blitter.c`) and the snapshots include the custom chip
 registers (`.regs` siblings), which is what unblocked them.
 
+### the scenery pass, measured (2026-08-20)
+
+`$21508a` is not one routine, it is a subsystem.  A call-graph closure
+from it (`tools/`-adjacent scratch script, CFG walk over `build/dasm`
+output) reaches **33 functions / ~1875 instructions**, six of which are
+already ported.  That is comparable in size to the car and road chains
+put together, so it is bounded work, not open-ended — but it is not a
+single stage.
+
+**`$21508a` itself (the 327-instruction head) is now ported and
+byte-exact** as `scen_prepare()` in `src/engine/road.c`, gated against
+`sh_0_21508a` -> `sh_1_2151b4` including its A0 and A2 register outputs.
+
+TRAP: `move.w ($30d8,A3),D1` reads the HIGH word of the course-position
+long — the whole-record part, not the fraction.  Reading the low word
+gets a plausible-looking index and 41 wrong bytes in the copied records.
+
+The head's tail is a two-state scan sharing ONE dbra counter: matching
+`$fc00` switches it to hunting `$fd00` and back again.  Which state ran
+the counter out decides the exit — falling out of the `$fc00` hunt runs
+`$215a7a` next, falling out of the `$fd00` hunt skips that BSR and
+publishes a synthetic `$fd00` marker to `$2f2a`.  So the head has to
+return a flag, not void.
+
+Below the head the graph layers cleanly, which gives the porting order
+(bottom-up, each tier gateable once the tier under it is done):
+
+    tier 0 (leaves, call nothing)   $216aca $216b50 $2162dc $216310
+                                    $215dac $2148b0 $21495a $214994
+    tier 1                          $2169e0
+    tier 2                          $2160f2  $216346
+    tier 3                          $215dce  $215ea2
+    tier 4 (thin dispatchers)       $215bca/$215bd2  $215c32  $215c60
+                                    $215d1e  $2159fa
+    tier 5                          $214798 $2147b6 $2147de $214810
+                                    $2148b2 $2148da $214914  -> $215906
+    tier 6                          the merge loop $2151de-$2152b8
+
+`$216aca` and `$216b50` are blit-queue emitters: they append four-plane
+records to the queue at A4 that `road_blitqueue` already consumes, type
+7 (masked, minterms `$9fc`/`$930`) and type 6 (unmasked, `$1ff`/`$100`),
+with `$3042` supplying a per-plane bit that picks the minterm.  Knowing
+these two are the bottom is what makes the rest safe to port upward.
+
+The merge loop at `$2151de` picks the nearest of three iterator streams
+(`$2f32`/`$2f34`/`$2f38`), draws it, advances that stream with the
+already-ported iterator, and loops — so tier 6 is small once tiers 0-5
+land.
+
 What is genuinely left, in dependency order:
 
-* **`$21508a` head (327 instructions)** — the scenery/object *scheduler*
-  that drives the five ported iterators, continuing past `$2151de`.  The
-  iterators are proven; the scheduler that sequences them is not.
+* **The remaining 27 scenery functions**, in the tier order above.  The
+  head is done; everything it dispatches to is not.
 * **The scenery / car-sprite / HUD draw passes.**  Until these land the
   drive demo shows a road with no trees, signs, opponents or dashboard,
   and `race_frame_begin` has to stay gated off (rotating the triple

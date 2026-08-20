@@ -102,6 +102,7 @@ uint32_t scen_next_a0(Game *g, uint32_t a0);   /* $215a9c */
 void     scen_next_table(Game *g);             /* $215adc */
 uint32_t scen_next_a1(Game *g, uint32_t a1);   /* $215b24 */
 void     scen_sort(Game *g);                   /* $215b58 */
+int      scen_prepare(Game *g, uint32_t *out_a0, uint32_t *out_a2); /* $21508a */
 
 /* ---- car model ---- */
 void car_update(Game *g, uint32_t view);       /* $2129f2 */

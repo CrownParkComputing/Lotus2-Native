@@ -305,6 +305,14 @@ static void stage_scen_a0(Game *g)
 static void stage_scen_table(Game *g) { scen_next_table(g); }
 static void stage_scen_a1(Game *g)
 { stage_expect(8 + 1, scen_next_a1(g, stage_a[1])); }
+/* $21508a: the scheduler head, which leaves A0 and A2 for the iterators */
+static void stage_scen_prepare(Game *g)
+{
+    uint32_t a0 = 0, a2 = 0;
+    scen_prepare(g, &a0, &a2);
+    stage_expect(8 + 0, a0);
+    stage_expect(8 + 2, a2);
+}
 
 /* $2133be: the band blitter, driven with the caller's registers and the
  * chipset state, both taken from the snapshot. */
@@ -396,6 +404,10 @@ int main(int argc, char **argv)
                                "re/pipeline/road/ph_5_211e94_fast.bin",
                                "re/pipeline/road/ph_6_211e98_fast.bin",
                                stage_tick);
+            rc |= verify_stage("scen_prepare",
+                               "re/pipeline/road/sh_0_21508a_fast.bin",
+                               "re/pipeline/road/sh_1_2151b4_fast.bin",
+                               stage_scen_prepare);
             rc |= verify_stage("scen_next_a2",
                                "re/pipeline/road/sd_0_2151b4_fast.bin",
                                "re/pipeline/road/sd_1_2151b8_fast.bin",

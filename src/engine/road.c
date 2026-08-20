@@ -874,3 +874,135 @@ void scen_sort(Game *g)
         pf32(g, p, v[i]); p += 4;
     }
 }
+
+/* ---- $21508a-$2151b4 [snapshot-verified]: scenery scheduler head ----
+ *
+ * The prologue of the scenery/object pass.  It does four things:
+ *
+ *  1. Copies nine 8-byte records out of the course table at $-1e78(A3),
+ *     indexed by the car's course position ($30d8), down into the
+ *     working buffer that ends at $-4098(A3).
+ *  2. Turns the distance to the next $90000 boundary into the scan
+ *     length $2fc4 and the countdown $2f32 (forced to $7c..$7f), and
+ *     positions A2 that far back into the buffer.
+ *  3. Seeds the four category countdowns: $2f10 (8, or 0 when $2dfe is
+ *     clear), $2f3c (10) and $2f3e (4).
+ *  4. When $2dee is set, runs a 32-step alternating scan over the
+ *     buffer looking for $fc00 and $fd00 markers in turn, stamping a
+ *     shading byte D2 into the low byte of each marker it matches.
+ *
+ * The scan is a two-state machine sharing one dbra counter: matching
+ * $fc00 switches it to hunting $fd00 and vice versa, and WHICH state ran
+ * out of the counter decides the exit -- falling out of the $fc00 hunt
+ * runs the A2 iterator ($215a7a) next, falling out of the $fd00 hunt
+ * skips it and publishes a synthetic $fd00 marker to $2f2a instead.
+ * That is why this returns a flag rather than void.
+ *
+ * Returns 1 when the caller must run $215a7a (scen_next_a2) first, 0
+ * when that BSR is skipped.  A0 and A2 for the following iterators come
+ * back through the out parameters.
+ */
+int scen_prepare(Game *g, uint32_t *out_a0, uint32_t *out_a2)
+{
+    pf16(g, A3 + 0x2f02, 0);
+    uint32_t pos = f32(g, A3 + 0x30d8);
+    pf32(g, A3 + 0x2fc6, pos);
+
+    /* nine records copied downward, two longs at a time, source stepping
+     * back 16 bytes per iteration against the destination's 8 */
+    uint32_t a0 = A3 - 0x4098;
+    /* move.w ($30d8,A3),D1 reads the HIGH word of that long: the course
+     * position's whole-record part, not its fraction. */
+    uint16_t idx = (uint16_t)((uint16_t)(pos >> 16) << 4);   /* asl.w #4 */
+    uint32_t a1 = A3 - 0x1e78;
+    a1 += (uint32_t)(int32_t)(int16_t)idx;              /* adda.w: whole reg */
+    a1 += 0x8a;
+    for (int i = 0; i < 9; i++) {                       /* moveq #8 + dbra */
+        a1 -= 4; a0 -= 4; pf32(g, a0, f32(g, a1));
+        a1 -= 4; a0 -= 4; pf32(g, a0, f32(g, a1));
+        a1 -= 8;
+    }
+
+    uint32_t d1 = (pos & 0xffff0000u) + 0x90000u - pos; /* clr.w then adds */
+    d1 <<= 4;                                           /* asl.l #4 */
+    pf16(g, A3 + 0x2fc4, (uint16_t)d1);
+    uint16_t d1w = (uint16_t)(d1 >> 16);                /* swap */
+    uint32_t a2 = A3 - 0x4098;
+    uint16_t d0 = (uint16_t)((d1w & 3) | 0x7c);
+    pf16(g, A3 + 0x2f32, d0);
+    d1w = (uint16_t)((uint16_t)(d1w - d0) >> 1);        /* sub.w, lsr.w #1 */
+    a2 -= (uint32_t)(int32_t)(int16_t)d1w;              /* suba.w */
+
+    pf16(g, A3 + 0x2f10, 8);
+    if (f16(g, A3 + 0x2dfe) == 0) pf16(g, A3 + 0x2f10, 0);
+    pf16(g, A3 + 0x2f3c, 0x000a);
+    pf16(g, A3 + 0x2f3e, 0x0004);
+    a0 = A3 - 0x4098;
+
+    int run_a2 = 1;
+    if (f16(g, A3 + 0x2dee) == 0) {                     /* $2151ae */
+        pf16(g, A3 + 0x2fd2, 0xffff);
+    } else {
+        pf16(g, A3 + 0x2fd2, (uint16_t)(f16(g, A3 + 0x2eb8) >> 8));
+        pf16(g, A3 + 0x2ec6, 0);
+        a2 -= 0x40;
+
+        int d7 = 0x1f;
+        uint16_t d6 = (uint16_t)(f16(g, A3 + 0x2f32) & 3);
+        d6 = (uint16_t)(d6 - 4);
+        d6 = (uint16_t)(d6 + d6);
+        uint16_t d2 = 0;
+        /* state 0 = hunting $fc00 ($215138), 1 = hunting $fd00 ($215176).
+         * A non-zero $30cc enters straight into the $fd00 hunt with the
+         * shading byte cleared and WITHOUT spending a dbra step. */
+        int state = f16(g, A3 + 0x30cc) != 0;
+        int exit_a6 = 0;                 /* 1 = $2151a6, 0 = $21518e */
+
+        for (;;) {
+            uint16_t w = (uint16_t)(f16(g, a2) & 0xff00);
+            a2 += 2;
+            int match = (w == (state ? 0xfd00 : 0xfc00));
+
+            if (match && !state) {       /* $215144: compute the byte */
+                if ((int16_t)d6 < 0) d2 = 0;
+                else {
+                    d2 = f16(g, A3 + 0x4b94 +
+                             (uint32_t)(int32_t)(int16_t)d6);
+                    d2 = (uint16_t)((int16_t)d2 >> 4);
+                    d2 = (uint16_t)((int16_t)d2 >> 1);
+                    d6 = (uint16_t)(d6 << 2);            /* asl.w #2 */
+                    d2 = (uint16_t)(d2 - f16(g, A3 - 0x2278 + 2 +
+                             (uint32_t)(int32_t)(int16_t)d6));
+                    d6 = (uint16_t)((int16_t)d6 >> 2);   /* asr.w #2 */
+                    d2 = (uint16_t)(-(int16_t)d2);
+                    if ((int16_t)d2 < 0) d2 = 0;
+                }
+            }
+            if (match) g->fast[(a2 - 1) - GUEST_FAST_ADDR] = (uint8_t)d2;
+
+            /* $215188 when the $fc00 hunt matched or the $fd00 hunt did
+             * not; $21516e otherwise.  Both add 8 to D6 and dbra, but to
+             * different loops -- and their fallthroughs exit differently. */
+            int via_188 = state ? !match : match;
+            d6 = (uint16_t)(d6 + 8);
+            d7 = (int16_t)(d7 - 1);
+            if (d7 == -1) { exit_a6 = !via_188; break; }
+            state = via_188;
+        }
+
+        d6 = (uint16_t)(d6 + 4);
+        (void)d6;                        /* addq.w #4,D6 is dead on both paths */
+        if (exit_a6) {                   /* $2151a6 */
+            pf16(g, A3 + 0x2fd4, d2);
+        } else {                         /* $21518e */
+            pf16(g, A3 + 0x2f2a, (uint16_t)(0xfd00 | (d2 & 0xff)));
+            pf16(g, A3 + 0x2ec6, 1);
+            pf16(g, A3 + 0x2fd4, d2);
+            run_a2 = 0;
+        }
+    }
+
+    if (out_a0) *out_a0 = a0;
+    if (out_a2) *out_a2 = a2;
+    return run_a2;
+}
