@@ -68,8 +68,15 @@ __attribute__((unused)) static int ov_car_checkpoint(M68K *m)
 { Game g = game_view(); car_checkpoint(&g, m->a[4]); ret(m, 189); return 1; }
 static int ov_car_clock(M68K *m)
 { Game g = game_view(); car_clock(&g, m->a[4]); ret(m, 107); return 1; }
-__attribute__((unused)) static int ov_car_distance(M68K *m)
-{ Game g = game_view(); car_distance(&g, m->a[4]); ret(m, 149); return 1; }
+static int ov_car_distance(M68K *m)
+{
+    Game g = game_view();
+    uint32_t r[16];
+    car_distance(&g, m->a[4], r);
+    m->d[0] = r[0]; m->d[1] = r[1];
+    ret(m, 149);
+    return 1;
+}
 __attribute__((unused)) static int ov_car_shape(M68K *m)
 { Game g = game_view(); car_shape(&g, m->a[4]); ret(m, 461); return 1; }
 __attribute__((unused)) static int ov_car_tick(M68K *m)
@@ -86,8 +93,15 @@ static int ov_scen_next_table(M68K *m)
 { Game g = game_view(); scen_next_table(&g); ret(m, 54); return 1; }
 __attribute__((unused)) static int ov_scen_next_a1(M68K *m)
 { Game g = game_view(); m->a[1] = scen_next_a1(&g, m->a[1]); ret(m, 148); return 1; }
-__attribute__((unused)) static int ov_scen_sort(M68K *m)
-{ Game g = game_view(); scen_sort(&g); ret(m, 410); return 1; }
+static int ov_scen_sort(M68K *m)
+{
+    Game g = game_view();
+    uint32_t r[8];
+    m->a[1] = scen_sort(&g, r);
+    for (int i = 0; i < 8; i++) m->d[i] = r[i];
+    ret(m, 410);
+    return 1;
+}
 
 /* NOT overridable yet: road_blitqueue ($2143c2) and road_band_bounds
  * ($214354).
@@ -148,6 +162,8 @@ static struct { uint32_t pc; NativeFn fn; const char *name; } table[] = {
     { 0x21263c, ov_car_clock,       "car_clock" },
     { 0x211dd4, ov_car_frame_latch, "car_frame_latch" },
     { 0x2169e0, ov_span_fill,       "span_fill" },
+    { 0x215b58, ov_scen_sort,       "scen_sort" },
+    { 0x212662, ov_car_distance,    "car_distance" },
 };
 #define NOVERRIDE ((int)(sizeof table / sizeof table[0]))
 

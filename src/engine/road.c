@@ -853,7 +853,11 @@ uint32_t scen_next_a1(Game *g, uint32_t a1)
  * DESCENDING by key.  The sorted eight longs are written to $2ecc(A3),
  * which is what the drawing code then walks.
  */
-void scen_sort(Game *g)
+/* Fills regs[0..7] with D0-D7 as the routine leaves them (the sorted
+ * key/value pairs, in the order `movem.l D0-D7,(A1)` writes them) and
+ * returns the final A1.  Reproducing those is what makes the port
+ * eligible to replace the routine outright; see tools/override_check.py. */
+uint32_t scen_sort(Game *g, uint32_t regs[8])
 {
     uint32_t k[4], v[4];
     k[0] = f32(g, A3 + 0x30d0); v[0] = f32(g, A3 + 0x30d4);
@@ -868,11 +872,14 @@ void scen_sort(Game *g)
                 t = v[i]; v[i] = v[i + 1]; v[i + 1] = t;
             }
 
-    uint32_t p = A3 + 0x2ecc;                   /* movem.l d0-d7,(a1) */
+    uint32_t a1 = A3 + 0x2ecc;                  /* lea ($2ecc,A3),A1 */
+    uint32_t p = a1;                            /* movem.l d0-d7,(a1) */
     for (int i = 0; i < 4; i++) {
         pf32(g, p, k[i]); p += 4;
         pf32(g, p, v[i]); p += 4;
+        if (regs) { regs[i * 2] = k[i]; regs[i * 2 + 1] = v[i]; }
     }
+    return a1;                                  /* movem does not advance A1 */
 }
 
 /* ---- $21508a-$2151b4 [snapshot-verified]: scenery scheduler head ----

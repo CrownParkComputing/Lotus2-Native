@@ -96,7 +96,7 @@ int main(int argc, char **argv)
         car_update(&g, VIEW);
         car_checkpoint(&g, VIEW);
         car_clock(&g, VIEW);
-        car_distance(&g, VIEW);
+        car_distance(&g, VIEW, NULL);
         car_shape(&g, VIEW);
         car_tick(&g, VIEW);
         car_frame_latch(&g);        /* $211dd4 */

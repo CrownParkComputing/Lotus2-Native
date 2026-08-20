@@ -101,7 +101,7 @@ uint32_t scen_next_a2(Game *g, uint32_t a2);   /* $215a7a */
 uint32_t scen_next_a0(Game *g, uint32_t a0);   /* $215a9c */
 void     scen_next_table(Game *g);             /* $215adc */
 uint32_t scen_next_a1(Game *g, uint32_t a1);   /* $215b24 */
-void     scen_sort(Game *g);                   /* $215b58 */
+uint32_t scen_sort(Game *g, uint32_t regs[8]);  /* $215b58; D0-D7, ret A1 */
 int      scen_prepare(Game *g, uint32_t *out_a0, uint32_t *out_a2); /* $21508a */
 
 /* The scenery drawing routines are register machines; whole 32-bit
@@ -120,7 +120,7 @@ uint32_t scen_shape_ptr(Game *g, uint32_t a1, uint32_t d6);  /* $215dac */
 void car_update(Game *g, uint32_t view);       /* $2129f2 */
 void car_checkpoint(Game *g, uint32_t view);   /* $212680 */
 void car_clock(Game *g, uint32_t view);        /* $21263c */
-void car_distance(Game *g, uint32_t view);     /* $212662 */
+void car_distance(Game *g, uint32_t view, uint32_t *regs); /* $212662; D0,D1 */
 void car_shape(Game *g, uint32_t view);        /* $212ba4 */
 void car_drive(Game *g, uint32_t view);        /* $212734 */
 void car_tick(Game *g, uint32_t view);         /* $21270a */

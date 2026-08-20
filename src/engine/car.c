@@ -229,7 +229,12 @@ void car_clock(Game *g, uint32_t a4)
 
 /* $212662-$21267e [snapshot-verified]: distance travelled.  Adds
  * (speed^2 >> 16, rounded down to a multiple of 8) * 1.25 to +$2e. */
-void car_distance(Game *g, uint32_t a4)
+/* regs (optional, 16 slots) receives the registers this routine leaves
+ * behind: D0 (the distance step it just added) and D1 (a quarter of it).
+ * A port that models memory but not registers cannot replace the routine
+ * -- see tools/override_check.py -- and this one has a single path, so
+ * the two values are simply the ones it already computes. */
+void car_distance(Game *g, uint32_t a4, uint32_t *regs)
 {
     uint16_t v = f16(g, a4 + 0x0e);
     uint32_t d0 = (uint32_t)v * v;              /* mulu.w */
@@ -239,6 +244,7 @@ void car_distance(Game *g, uint32_t a4)
     uint32_t d1 = d0 >> 2;                      /* lsr.l #2 */
     d0 += d1;
     pf32(g, a4 + 0x2e, f32(g, a4 + 0x2e) + d0);
+    if (regs) { regs[0] = d0; regs[1] = d1; }
 }
 
 /* $212bb8-$212c04 [snapshot-verified]

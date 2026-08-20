@@ -312,7 +312,7 @@ static void chain_car(Game *g)
     car_update(g, view);                        /* $211e78 */
     car_checkpoint(g, view);                    /* $211e7c */
     car_clock(g, view);                         /* $211e80 */
-    car_distance(g, view);                      /* $211e84 */
+    car_distance(g, view, NULL);                /* $211e84 */
     car_shape(g, view);                         /* $211e88 */
     car_tick(g, view);                          /* $211e94 */
 }
@@ -343,7 +343,12 @@ static void stage_input_read(Game *g) { input_read(g, &stage_input); }
 static void stage_car(Game *g) { car_update(g, A3_BASE + 0x3054); }
 static void stage_checkpoint(Game *g) { car_checkpoint(g, A3_BASE + 0x3054); }
 static void stage_clock(Game *g) { car_clock(g, A3_BASE + 0x3054); }
-static void stage_distance(Game *g) { car_distance(g, A3_BASE + 0x3054); }
+static void stage_distance(Game *g)
+{
+    uint32_t r[16];
+    car_distance(g, A3_BASE + 0x3054, r);
+    stage_expect(0, r[0]); stage_expect(1, r[1]);
+}
 static void stage_shape(Game *g) { car_shape(g, A3_BASE + 0x3054); }
 static void stage_tick(Game *g) { car_tick(g, A3_BASE + 0x3054); }
 
@@ -377,6 +382,13 @@ static void stage_span_fill(Game *g)
     stage_expect(4, s.d4); stage_expect(5, s.d5);
     stage_expect(6, s.d6); stage_expect(7, s.d7);
     stage_expect(8 + 2, s.a2); stage_expect(8 + 4, s.a4);
+}
+
+static void stage_scen_sort(Game *g)
+{
+    uint32_t r[8];
+    stage_expect(8 + 1, scen_sort(g, r));
+    for (int i = 0; i < 8; i++) stage_expect(i, r[i]);
 }
 
 static void stage_frame_latch(Game *g)
@@ -546,7 +558,7 @@ int main(int argc, char **argv)
             rc |= verify_stage("scen_sort",
                                "re/pipeline/road/sd_3_2151c0_fast.bin",
                                "re/pipeline/road/sd_4_2151c4_fast.bin",
-                               scen_sort);
+                               stage_scen_sort);
             rc |= verify_stage("scen_next_a1",
                                "re/pipeline/road/sd_5_2151c8_fast.bin",
                                "re/pipeline/road/sd_6_2151cc_fast.bin",
