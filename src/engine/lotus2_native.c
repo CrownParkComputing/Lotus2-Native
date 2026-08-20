@@ -320,7 +320,7 @@ static void stage_span_fill(Game *g)
 {
     Span s = { stage_d[0], stage_d[1], stage_d[2], stage_d[3],
                stage_d[4], stage_d[5], stage_d[6], stage_d[7],
-               stage_a[2], stage_a[4] };
+               stage_a[0], stage_a[1], stage_a[2], stage_a[4] };
     span_fill(g, &s);
     stage_expect(0, s.d0); stage_expect(1, s.d1);
     stage_expect(2, s.d2); stage_expect(3, s.d3);
@@ -331,6 +331,21 @@ static void stage_span_fill(Game *g)
 
 static void stage_shape_ptr(Game *g)
 { stage_expect(8 + 1, scen_shape_ptr(g, stage_a[1], stage_d[6])); }
+
+/* $2160f2 -> $216346: project a scenery object and queue its blit. */
+static void stage_project(Game *g)
+{
+    Span s = { stage_d[0], stage_d[1], stage_d[2], stage_d[3],
+               stage_d[4], stage_d[5], stage_d[6], stage_d[7],
+               stage_a[0], stage_a[1], stage_a[2], stage_a[4] };
+    scen_project(g, &s);
+    stage_expect(0, s.d0); stage_expect(1, s.d1);
+    stage_expect(2, s.d2); stage_expect(3, s.d3);
+    stage_expect(4, s.d4); stage_expect(5, s.d5);
+    stage_expect(6, s.d6); stage_expect(7, s.d7);
+    stage_expect(8 + 0, s.a0); stage_expect(8 + 1, s.a1);
+    stage_expect(8 + 2, s.a2); stage_expect(8 + 4, s.a4);
+}
 
 /* $2133be: the band blitter, driven with the caller's registers and the
  * chipset state, both taken from the snapshot. */
@@ -422,6 +437,10 @@ int main(int argc, char **argv)
                                "re/pipeline/road/ph_5_211e94_fast.bin",
                                "re/pipeline/road/ph_6_211e98_fast.bin",
                                stage_tick);
+            rc |= verify_stage("scen_project ($2160f2+$216346)",
+                               "re/pipeline/road/pj_0_215f00_fast.bin",
+                               "re/pipeline/road/pj_1_215f04_fast.bin",
+                               stage_project);
             rc |= verify_stage("scen_shape_ptr (FOREST: early-out only)",
                                "re/pipeline/road/sl_0_215f08_fast.bin",
                                "re/pipeline/road/sl_1_215f0c_fast.bin",

@@ -109,9 +109,11 @@ int      scen_prepare(Game *g, uint32_t *out_a0, uint32_t *out_a2); /* $21508a *
  * the snapshot gate compares all 32 bits. */
 typedef struct {
     uint32_t d0, d1, d2, d3, d4, d5, d6, d7;
-    uint32_t a2, a4;
+    uint32_t a0, a1, a2, a4;
 } Span;
 void span_fill(Game *g, Span *s);              /* $2169e0 */
+void scen_project(Game *g, Span *s);           /* $2160f2 -> $216346 */
+void scen_emit(Game *g, Span *s);              /* $216346 */
 uint32_t scen_shape_ptr(Game *g, uint32_t a1, uint32_t d6);  /* $215dac */
 
 /* ---- car model ---- */

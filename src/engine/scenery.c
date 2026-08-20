@@ -13,6 +13,8 @@
  * port that keeps only the low words passes the memory check and fails
  * the register one.
  */
+#include <stdio.h>
+#include <stdlib.h>
 #include "engine.h"
 
 #define A3 0x208000u
@@ -39,7 +41,8 @@ static void span_emit_masked(Game *g, Span *s)
     pf16(g, s->a4, w(s->d0)); s->a4 += 2;
 
     s->d6 = setw(s->d6, (uint16_t)(w(s->d3) + w(s->d3)));
-    s->a2 = addaw(s->a2, f16(g, A3 - 0x3d6a
+    s->a1 = A3 - 0x3d6a;                             /* lea writes A1 */
+    s->a2 = addaw(s->a2, f16(g, s->a1
                              + (uint32_t)(int32_t)(int16_t)w(s->d6)));
     s->a2 = addaw(s->a2, w(s->d1));
     s->a2 = addaw(s->a2, w(s->d1));
@@ -77,7 +80,8 @@ static void span_emit_solid(Game *g, Span *s)
     pf16(g, s->a4, w(s->d6)); s->a4 += 2;
 
     s->d6 = setw(s->d6, (uint16_t)(w(s->d3) + w(s->d3)));
-    s->a2 = addaw(s->a2, f16(g, A3 - 0x3d6a
+    s->a1 = A3 - 0x3d6a;                             /* lea writes A1 */
+    s->a2 = addaw(s->a2, f16(g, s->a1
                              + (uint32_t)(int32_t)(int16_t)w(s->d6)));
     s->a2 = addaw(s->a2, w(s->d1));
     s->a2 = addaw(s->a2, w(s->d1));
@@ -131,8 +135,10 @@ void span_fill(Game *g, Span *s)
     if (cols == 0) {                                   /* $216a24 */
         uint16_t l = (uint16_t)((w(s->d2) & 0xf) * 2);
         uint16_t r = (uint16_t)((w(s->d4) & 0xf) * 2);
-        uint16_t m = f16(g, 0x216e60 + l);
-        m &= f16(g, 0x216e40 + r);
+        s->a1 = 0x216e60;
+        uint16_t m = f16(g, s->a1 + l);
+        s->a1 = 0x216e40;
+        m &= f16(g, s->a1 + r);
         s->d0 = setw(s->d0, m);
         s->d1 = setw(s->d1, (uint16_t)(w(s->d2) >> 4));
         span_emit_masked(g, s);
@@ -140,12 +146,14 @@ void span_fill(Game *g, Span *s)
     }
     if (cols == 1) {                                   /* $216a4e */
         uint16_t l = (uint16_t)((w(s->d2) & 0xf) * 2);
-        s->d0 = setw(s->d0, f16(g, 0x216e60 + l));
+        s->a1 = 0x216e60;
+        s->d0 = setw(s->d0, f16(g, s->a1 + l));
         s->d1 = setw(s->d1, (uint16_t)(w(s->d2) >> 4));
         span_emit_masked(g, s);
         uint16_t r = (uint16_t)(w(s->d4) & 0xf);
+        s->a1 = 0x216e40;
         if (r == 0) return;
-        s->d0 = setw(s->d0, f16(g, 0x216e40 + r * 2));
+        s->d0 = setw(s->d0, f16(g, s->a1 + r * 2));
         s->d1 = setw(s->d1, (uint16_t)(w(s->d4) >> 4));
         span_emit_masked(g, s);
         return;
@@ -153,14 +161,16 @@ void span_fill(Game *g, Span *s)
     /* $216a7e: both edges, then the solid middle */
     {
         uint16_t l = (uint16_t)(w(s->d2) & 0xf);
+        s->a1 = 0x216e60;
         if (l) {
-            s->d0 = setw(s->d0, f16(g, 0x216e60 + l * 2));
+            s->d0 = setw(s->d0, f16(g, s->a1 + l * 2));
             s->d1 = setw(s->d1, (uint16_t)(w(s->d2) >> 4));
             span_emit_masked(g, s);
         }
         uint16_t r = (uint16_t)(w(s->d4) & 0xf);
+        s->a1 = 0x216e40;
         if (r) {
-            s->d0 = setw(s->d0, f16(g, 0x216e40 + r * 2));
+            s->d0 = setw(s->d0, f16(g, s->a1 + r * 2));
             s->d1 = setw(s->d1, (uint16_t)(w(s->d4) >> 4));
             span_emit_masked(g, s);
         }
@@ -185,4 +195,527 @@ uint32_t scen_shape_ptr(Game *g, uint32_t a1, uint32_t d6)
     if (f16(g, A3 + 0x2df8) != 0) return f32(g, A3 + 0x2508 + idx);
     if (f16(g, A3 + 0x2df6) != 0) return f32(g, A3 + 0x25c8 + idx);
     return a1;
+}
+
+/* ---- $2160f2 / $216346: project a scenery object and queue its blit ----
+ *
+ * These are two `bsr` targets that also fall into one another
+ * ($2160f2 reaches $216346 by branch, and $215dce branches into
+ * $2160f2), so they are one routine with several doors rather than a
+ * caller and a callee.  scen_project() is the $2160f2 door and ends by
+ * calling scen_emit(), the $216346 one.
+ *
+ * $2160f2 turns a course-relative position into screen coordinates:
+ * near objects ($216144) interpolate between two rows of the scanline
+ * tables at $-2278(A3) using the sub-row fraction, far ones ($2161bc)
+ * take a row straight.  $216346 then reads the object's shape header
+ * out of CHIP RAM, clips it, and appends a variable-length record to
+ * the blit queue at A4.
+ *
+ * The shape pointers are chip addresses while the tables are ExpMem, so
+ * this is the first ported routine that has to read from both.
+ */
+static uint16_t m16(const Game *g, uint32_t a)
+{ return a < GUEST_CHIP_SIZE ? g16(g->chip, a) : f16(g, a); }
+static uint32_t m32(const Game *g, uint32_t a)
+{ return a < GUEST_CHIP_SIZE ? g32(g->chip, a) : f32(g, a); }
+static uint8_t m8(const Game *g, uint32_t a)
+{ return a < GUEST_CHIP_SIZE ? g->chip[a] : g->fast[a - GUEST_FAST_ADDR]; }
+
+/* muls.w: signed 16x16 into the WHOLE 32-bit destination */
+static uint32_t muls_w(uint16_t a, uint16_t b)
+{ return (uint32_t)((int32_t)(int16_t)a * (int32_t)(int16_t)b); }
+static uint32_t swapw(uint32_t v) { return (v >> 16) | (v << 16); }
+static uint16_t ror16(uint16_t v, int n)
+{ return (uint16_t)((v >> n) | (v << (16 - n))); }
+static int16_t sw(uint32_t r) { return (int16_t)(uint16_t)r; }
+
+/* blit-queue writers */
+static void qw(Game *g, Span *s, uint16_t v) { pf16(g, s->a4, v); s->a4 += 2; }
+static void ql(Game *g, Span *s, uint32_t v) { pf32(g, s->a4, v); s->a4 += 4; }
+/* the two record shapes the variants below are built from */
+static void rec_a1(Game *g, Span *s)
+{ ql(g,s,s->a0); ql(g,s,s->a1); ql(g,s,s->a2); ql(g,s,s->a2); qw(g,s,w(s->d6)); }
+static void rec_no_a1(Game *g, Span *s)
+{ ql(g,s,s->a0); ql(g,s,s->a2); ql(g,s,s->a2); qw(g,s,w(s->d6)); }
+
+void scen_project(Game *g, Span *s)
+{
+    pf16(g, A3 + 0x2ef6, w(s->d4));
+    uint16_t cls = f16(g, A3 + 0x2fc2);
+    if (cls == 0x00fc || cls == 0x00fd || cls == 0x0078 ||
+        cls == 0x0079 || cls == 0x007a) {
+        pf16(g, A3 + 0x2fbc, 0xfffe);
+        s->d1 = setw(s->d1, 0);
+    }
+
+    int far = (w(s->d0) >= 0x40) || (f16(g, A3 + 0x2fbc) == 0xfffe);
+    if (!far) {
+        pf16(g, A3 + 0x2f1a, (uint16_t)(f16(g, A3 + 0x2f1a) - 1));
+        if (w(s->d0) >= f16(g, A3 + 0x2f1a)) return;
+
+        /* $216144: interpolate between two scanline rows */
+        s->d2 = setw(s->d2, (uint16_t)(w(s->d2) >> 1));
+        s->d3 = setw(s->d3, w(s->d2));
+        s->d0 = setw(s->d0, (uint16_t)(w(s->d0) + w(s->d0)));
+        s->d4 = setw(s->d4, w(s->d0));
+        s->d4 = setw(s->d4, (uint16_t)(w(s->d4) + w(s->d4)));
+        s->d4 = setw(s->d4, (uint16_t)(w(s->d4) + w(s->d4)));
+        s->a0 = A3 - 0x2278;                         /* lea writes A0 */
+        uint32_t t = s->a0 + (uint32_t)(int32_t)sw(s->d4);
+        pf16(g, A3 + 0x2f4a, m16(g, t + 4));
+        pf16(g, A3 + 0x2ef8, m16(g, t + 6));
+        s->d2 = setw(s->d2, m16(g, t + 8));
+        s->d5 = setw(s->d5, m16(g, t));
+        s->d2 = setw(s->d2, (uint16_t)(w(s->d2) - w(s->d5)));
+        s->d2 = swapw(muls_w(w(s->d3), w(s->d2)) * 2);
+        s->d2 = setw(s->d2, (uint16_t)(w(s->d2) + w(s->d5)));
+        s->d1 = setw(s->d1, (uint16_t)(w(s->d1) - f16(g, A3 + 0x2f1c)));
+        s->d1 = setw(s->d1, (uint16_t)(w(s->d1) << 3));
+        s->d1 = setw(s->d1, (uint16_t)(w(s->d1) - w(s->d2)));
+        s->d2 = setw(s->d2, m16(g, t + 0xa));
+        s->d5 = setw(s->d5, m16(g, t + 2));
+        s->d2 = setw(s->d2, (uint16_t)(w(s->d2) - w(s->d5)));
+        s->d2 = swapw(muls_w(w(s->d3), w(s->d2)) * 2);
+        s->d2 = setw(s->d2, (uint16_t)(w(s->d2) + w(s->d5)));
+        s->a0 = A3 + 0x4b94;
+        uint32_t z = s->a0 + (uint32_t)(int32_t)sw(s->d0);
+        pf16(g, A3 + 0x2efe, m16(g, z));
+        s->d4 = setw(s->d4, m16(g, z + 2));
+        s->d5 = setw(s->d5, m16(g, z));
+        s->d4 = setw(s->d4, (uint16_t)(w(s->d4) - w(s->d5)));
+        s->d4 = swapw(muls_w(w(s->d3), w(s->d4)) * 2);
+        s->d4 = setw(s->d4, (uint16_t)(w(s->d4) + w(s->d5)));
+        s->d4 = setw(s->d4, (uint16_t)(w(s->d4) + w(s->d4)));
+        s->d1 = swapw(muls_w(w(s->d4), w(s->d1)));
+        s->d6 = setw(s->d6, (uint16_t)(f16(g, A3 + 0x2eaa) - 2));
+        if (!(w(s->d2) < w(s->d6))) s->d2 = setw(s->d2, w(s->d6));
+    } else {
+        /* $2161bc: one row straight out of the table */
+        if (w(s->d0) >= f16(g, A3 + 0x2f1a)) return;
+        s->d0 = setw(s->d0, (uint16_t)(w(s->d0) + w(s->d0)));
+        s->d2 = setw(s->d2, w(s->d0));
+        s->d2 = setw(s->d2, (uint16_t)(w(s->d2) + w(s->d2)));
+        s->d2 = setw(s->d2, (uint16_t)(w(s->d2) + w(s->d2)));
+        s->a0 = A3 - 0x2278;
+        uint32_t t = s->a0 + (uint32_t)(int32_t)sw(s->d2);
+        pf16(g, A3 + 0x2f4a, m16(g, t + 4));
+        pf16(g, A3 + 0x2ef8, m16(g, t + 6));
+        s->d1 = setw(s->d1, (uint16_t)(w(s->d1) - f16(g, A3 + 0x2f1c)));
+        s->d1 = setw(s->d1, (uint16_t)(w(s->d1) << 3));
+            s->a0 = A3 - 0x2278;                     /* second lea, same value */
+        s->d1 = setw(s->d1, (uint16_t)(w(s->d1) - m16(g, t)));
+        s->d2 = setw(s->d2, m16(g, t + 2));
+        s->a0 = A3 + 0x4b94;
+        uint32_t z = s->a0 + (uint32_t)(int32_t)sw(s->d0);
+        s->d4 = setw(s->d4, m16(g, z));
+        pf16(g, A3 + 0x2efe, w(s->d4));
+        s->d4 = setw(s->d4, (uint16_t)(w(s->d4) + w(s->d4)));
+        s->d1 = swapw(muls_w(w(s->d4), w(s->d1)));
+        s->d6 = setw(s->d6, (uint16_t)(f16(g, A3 + 0x2eaa) - 2));
+        if (!(w(s->d2) < w(s->d6))) s->d2 = setw(s->d2, w(s->d6));
+    }
+
+    /* $21620c: common tail */
+    if (sw(s->d2) - (int16_t)f16(g, A3 + 0x2f4a) < 0)
+        pf16(g, A3 + 0x2f4a, w(s->d2));
+    s->d6 = setw(s->d6, f16(g, A3 + 0x2ef6));
+    if (w(s->d6) != 0) {
+        s->d6 = swapw(muls_w(f16(g, A3 + 0x2efe), w(s->d6)));
+        s->d6 = setw(s->d6, (uint16_t)(sw(s->d6) >> 5));
+        s->d2 = setw(s->d2, (uint16_t)(w(s->d2) - w(s->d6)));
+    }
+    if (f16(g, A3 + 0x2fc2) == 0x72) {
+        s->d6 = setw(s->d6, (uint16_t)(f16(g, A3 + 0x2efe) >> 5));
+        s->d2 = setw(s->d2, (uint16_t)(w(s->d2) - w(s->d6)));
+    }
+
+    if (f16(g, A3 + 0x2fbc) == 0xfffe) { scen_emit(g, s); return; }
+    if (s->a1 != f32(g, A3 + 0x26a4) && s->a1 != f32(g, A3 + 0x2d1c)) {
+        scen_emit(g, s); return;
+    }
+
+    /* $21624e: pick the shading row for this object's height band */
+    s->d6 = setw(s->d6, w(s->d7));
+    s->d7 = setw(s->d7, (uint16_t)(w(s->d7) << 3));
+    s->d7 = setw(s->d7, (uint16_t)(w(s->d7) + w(s->d6)));
+    s->d6 = setw(s->d6, (uint16_t)(-sw(s->d1)));
+    s->d6 = setw(s->d6, (uint16_t)(w(s->d6) + 0x90));
+    s->d6 = setw(s->d6, (uint16_t)(sw(s->d6) >> 2));
+    uint16_t mode = f16(g, A3 + 0x2fbc);
+    int bias = (mode == 3) ||
+               (mode == 1 && (f16(g, A3 + 0x304e) != 0 ||
+                              f16(g, A3 + 0x3050) != 0));
+    if (bias) {
+        s->d4 = setw(s->d4, f16(g, A3 + 0x2fbe));
+        s->d6 = setw(s->d6, (uint16_t)(w(s->d6) + w(s->d4)));
+    }
+    s->d4 = setw(s->d4, f16(g, A3 + 0x2ef8));
+    s->d4 = setw(s->d4, (uint16_t)(sw(s->d4) >> 2));
+    s->d6 = setw(s->d6, (uint16_t)(w(s->d6) - w(s->d4)));
+    s->d6 = setw(s->d6, (uint16_t)(sw(s->d6) >> 3));
+    if (sw(s->d6) < 0) s->d6 = 0;                    /* moveq: all 32 */
+    if (!(sw(s->d6) - 8 < 0)) s->d6 = 8;
+    s->d7 = setw(s->d7, (uint16_t)(w(s->d7) + w(s->d6)));
+    s->d7 = setw(s->d7, (uint16_t)(w(s->d7) + f16(g, A3 + 0x2fe4)));
+    /* move.b writes ONE byte of D7, then andi.w clears the rest */
+    s->a0 = 0x216e80;
+    s->d7 = (s->d7 & 0xffffff00u) |
+            m8(g, s->a0 + (uint32_t)(int32_t)sw(s->d7));
+    s->d7 = setw(s->d7, (uint16_t)(w(s->d7) & 0xff));
+
+    if (f16(g, A3 + 0x2df6) != 0 && !(sw(s->d7) - 0x18 < 0)) {
+        s->d0 = swapw(f32(g, A3 + 0x2f1e) << 4);
+        s->d0 = setw(s->d0, (uint16_t)(w(s->d0) + f16(g, A3 + 0x2fd0)));
+        s->d0 = setw(s->d0, (uint16_t)(w(s->d0) >> 4));
+        s->d0 = setw(s->d0, (uint16_t)(w(s->d0) << 4));
+        s->a0 = A3 - 0x1e78;
+        uint32_t r = s->a0 + (uint32_t)(int32_t)sw(s->d0);
+        if ((int16_t)m16(g, r + 0xa) < 0) {
+            s->a1 = f32(g, A3 + 0x279c);
+            s->d7 = setw(s->d7, (uint16_t)(w(s->d7) - 0x18));
+        }
+    }
+    scen_emit(g, s);
+}
+
+/* $216346: clip the object's shape and append its blit-queue record.
+ *
+ * The record layout depends on two selectors: $2fbc (the object class)
+ * and, when $2fbc is negative, the long at $2f4c (how many source
+ * planes the shape has).  Each variant is the same handful of moves in
+ * a different order, walking A1 forward by the plane stride D1 and A2
+ * down the bitmap by D4.
+ */
+/* $216812 -> $216916: the ground-shadow path.
+ *
+ * Objects whose class $2fbc is $fffe do not blit a shape at all: they
+ * lay down three filled spans under the object -- two narrow ones for
+ * the shadow's sides and a wide one for its body -- through span_fill.
+ * $303c/$303e/$3040 supply the plane mask for each.
+ *
+ * The $2fc2 >= $f0 branch at $216852 is a different shadow shape that
+ * does not run on FOREST; it aborts loudly rather than silently doing
+ * nothing.
+ */
+static void scen_shadow(Game *g, Span *s)
+{
+    /* $216812: pick the shadow's shading bytes for the current weather */
+    uint32_t tab = 0;
+    if (f16(g, A3 + 0x2df8) != 0) tab = 0x216bf6;
+    else if (f16(g, A3 + 0x2df6) != 0) tab = 0x216bd4;
+    if (tab) {
+        uint32_t i = (uint32_t)(int32_t)sw(s->d7);
+        g->fast[(A3 + 0x303d) - GUEST_FAST_ADDR] = m8(g, tab + i);
+        g->fast[(A3 + 0x303f) - GUEST_FAST_ADDR] = m8(g, tab + 0x11 + i);
+        g->fast[(A3 + 0x3041) - GUEST_FAST_ADDR] = m8(g, tab + 0x11 + i);
+    }
+
+    if (!((int16_t)(f16(g, A3 + 0x2fc2) - 0xf0) < 0)) {
+        fprintf(stderr, "scen_shadow: $216856 path ($2fc2 >= $f0) "
+                        "not ported\n");
+        abort();
+    }
+
+    /* $216916 */
+    s->d1 = setw(s->d1, (uint16_t)(w(s->d1) + 0xa0));
+    pf16(g, A3 + 0x2efa, w(s->d1));
+    pf16(g, A3 + 0x2efc, w(s->d2));
+    s->d0 = setw(s->d0, (uint16_t)(f16(g, A3 + 0x2efe) >> 4));
+    pf16(g, A3 + 0x2f00, w(s->d0));
+    pf16(g, A3 + 0x2f00, (uint16_t)(f16(g, A3 + 0x2f00) >> 1));  /* lsr.w (ea) */
+    s->d0 = setw(s->d0, (uint16_t)(w(s->d0) + w(s->d0)));
+    s->a0 = A3 - 0x4048;
+    s->d0 = setw(s->d0, m16(g, s->a0 + (uint32_t)(int32_t)sw(s->d0)));
+    pf16(g, A3 + 0x2efe, w(s->d0));
+
+    pf16(g, A3 + 0x3042, f16(g, A3 + 0x303c));
+    s->d4 = setw(s->d4, (uint16_t)(f16(g, A3 + 0x2efa) - f16(g, A3 + 0x2efe)));
+    s->d5 = setw(s->d5, f16(g, A3 + 0x2efc));
+    s->d0 = setw(s->d0, f16(g, A3 + 0x2f00));
+    s->d3 = setw(s->d3, (uint16_t)(w(s->d5) - w(s->d0)));
+    s->d2 = setw(s->d2, w(s->d4));
+    s->d0 = setw(s->d0, (uint16_t)(w(s->d0) >> 3));
+    s->d2 = setw(s->d2, (uint16_t)(w(s->d2) - w(s->d0)));
+    span_fill(g, s);
+
+    pf16(g, A3 + 0x3042, f16(g, A3 + 0x303c));
+    s->d2 = setw(s->d2, (uint16_t)(f16(g, A3 + 0x2efa) + f16(g, A3 + 0x2efe)));
+    s->d5 = setw(s->d5, f16(g, A3 + 0x2efc));
+    s->d0 = setw(s->d0, f16(g, A3 + 0x2f00));
+    s->d3 = setw(s->d3, (uint16_t)(w(s->d5) - w(s->d0)));
+    s->d4 = setw(s->d4, w(s->d2));
+    s->d0 = setw(s->d0, (uint16_t)(w(s->d0) >> 3));
+    s->d4 = setw(s->d4, (uint16_t)(w(s->d4) + w(s->d0)));
+    span_fill(g, s);
+
+    pf16(g, A3 + 0x3042, f16(g, A3 + 0x303e));
+    if (f16(g, A3 + 0x2fc2) != 0x7a)
+        pf16(g, A3 + 0x3042, f16(g, A3 + 0x3040));
+    s->d0 = setw(s->d0, (uint16_t)(f16(g, A3 + 0x2f00) >> 3));
+    s->d2 = setw(s->d2, (uint16_t)(f16(g, A3 + 0x2efa) - f16(g, A3 + 0x2efe)));
+    s->d2 = setw(s->d2, (uint16_t)(w(s->d2) - w(s->d0)));
+    s->d4 = setw(s->d4, (uint16_t)(f16(g, A3 + 0x2efa) + f16(g, A3 + 0x2efe)));
+    s->d4 = setw(s->d4, (uint16_t)(w(s->d4) + w(s->d0)));
+    s->d5 = setw(s->d5, f16(g, A3 + 0x2efc));
+    s->d0 = setw(s->d0, f16(g, A3 + 0x2f00));
+    s->d5 = setw(s->d5, (uint16_t)(w(s->d5) - w(s->d0)));
+    s->d3 = setw(s->d3, w(s->d5));
+    s->d0 = setw(s->d0, (uint16_t)(w(s->d0) >> 1));
+    s->d3 = setw(s->d3, (uint16_t)(w(s->d3) - w(s->d0)));
+    s->d0 = setw(s->d0, (uint16_t)(w(s->d3) + w(s->d5)));
+    s->d0 = setw(s->d0, (uint16_t)(w(s->d0) >> 1));
+    pf16(g, A3 + 0x2fb4, w(s->d0));
+    if (f16(g, A3 + 0x2fc2) == 0xfd) {
+        s->d3 = setw(s->d3, (uint16_t)(f16(g, A3 + 0x2f2a) & 0xff));
+    }
+    span_fill(g, s);
+}
+
+void scen_emit(Game *g, Span *s)
+{
+    if (f16(g, A3 + 0x2fbc) == 0xff00) {
+        s->d0 = s->a4 - f32(g, A3 + 0x2f42);   /* move.l A4,D0: all 32 */
+        if (s->d0 >= 0x1cac) return;
+        pf16(g, A3 + 0x2fbc, 0xffff);
+        pf32(g, A3 + 0x2f4c, m32(g, s->a1)); s->a1 += 4;
+        pf32(g, A3 + 0x2f50, m32(g, s->a1)); s->a1 += 4;
+        s->d7 = setw(s->d7, (uint16_t)(w(s->d7) << 3));
+        uint32_t h = s->a1 + (uint32_t)(int32_t)sw(s->d7);
+        s->a0 = m32(g, h);
+        s->d4 = setw(s->d4, m16(g, h + 4));
+        s->d3 = setw(s->d3, m16(g, h + 6));
+        s->a0 += s->a1;
+        s->d1 = setw(s->d1, (uint16_t)(w(s->d1) + 0xa0));
+        s->d7 = setw(s->d7, f16(g, A3 + 0x2fb4));
+        s->d0 = setw(s->d0, (uint16_t)(sw(s->d3) >> 1));
+        s->d7 = setw(s->d7, (uint16_t)(w(s->d7) + w(s->d0)));
+        s->d5 = setw(s->d5, (uint16_t)(w(s->d7) - w(s->d3)));
+        s->d7 = setw(s->d7, (uint16_t)(w(s->d7) - 1));
+        s->d0 = setw(s->d0, (uint16_t)(sw(s->d4) >> 1));
+        s->d1 = setw(s->d1, (uint16_t)(w(s->d1) - w(s->d0)));
+    } else {
+        s->d0 = s->a4 - f32(g, A3 + 0x2f42);
+        if (s->d0 >= 0x1cac) return;
+        if (f16(g, A3 + 0x2fbc) == 0xfffe) {
+            scen_shadow(g, s);   /* $216812 */
+            return;
+        }
+        s->d0 = s->a1;                         /* move.l A1,D0; beq */
+        if (s->d0 == 0) return;
+        pf32(g, A3 + 0x2f4c, m32(g, s->a1)); s->a1 += 4;
+        pf32(g, A3 + 0x2f50, m32(g, s->a1)); s->a1 += 4;
+        s->d7 = setw(s->d7, (uint16_t)(w(s->d7) << 3));
+        uint32_t h = s->a1 + (uint32_t)(int32_t)sw(s->d7);
+        s->a0 = m32(g, h);
+        s->d4 = setw(s->d4, m16(g, h + 4));
+        s->d3 = setw(s->d3, m16(g, h + 6));
+        s->a0 += s->a1;
+        s->d1 = setw(s->d1, (uint16_t)(w(s->d1) + 0xa0));
+        s->d7 = setw(s->d7, w(s->d2));
+        s->d2 = setw(s->d2, (uint16_t)(w(s->d2) - w(s->d3)));
+        s->d2 = setw(s->d2, (uint16_t)(w(s->d2) + 1));
+        s->d5 = setw(s->d5, w(s->d2));
+        s->d0 = setw(s->d0, (uint16_t)(sw(s->d4) >> 1));
+        s->d1 = setw(s->d1, (uint16_t)(w(s->d1) - w(s->d0)));
+    }
+
+    /* $2163e2: clip against the bitmap and build the blitter words */
+    pf16(g, A3 + 0x2ffe, 0);
+    uint16_t frac = (uint16_t)(w(s->d1) & 0xf);
+    s->d2 = setw(s->d2, (uint16_t)(w(s->d4) - 1));
+    s->d2 = setw(s->d2, (uint16_t)(w(s->d2) & 0xf));
+    s->d2 = setw(s->d2, (uint16_t)(w(s->d2) + 1));
+    s->d2 = setw(s->d2, (uint16_t)(w(s->d2) + frac));
+    s->d2 = setw(s->d2, (uint16_t)(w(s->d2) - 1));
+    if (sw(s->d2) - 0x10 < 0) pf16(g, A3 + 0x2ffe, 1);
+
+    pf16(g, A3 + 0x2f04, w(s->d1));
+    pf16(g, A3 + 0x2f08, w(s->d5));
+    pf16(g, A3 + 0x2f0a, w(s->d7));
+    s->d2 = setw(s->d2, (uint16_t)(w(s->d1) + w(s->d4)));
+    pf16(g, A3 + 0x2f06, w(s->d2));
+    s->d2 = setw(s->d2, (uint16_t)(sw(s->d1) >> 4));
+    s->d2 = setw(s->d2, (uint16_t)(w(s->d2) + 1));
+    s->d1 = setw(s->d1, (uint16_t)(w(s->d1) & 0xf));
+    s->d1 = setw(s->d1, ror16(w(s->d1), 4));
+    pf16(g, A3 + 0x303a, w(s->d1));
+    s->d4 = setw(s->d4, (uint16_t)(w(s->d4) + 0xf));
+    s->d4 = setw(s->d4, (uint16_t)(w(s->d4) >> 4));
+    s->d6 = setw(s->d6, (uint16_t)(w(s->d2) + w(s->d4)));
+    s->d1 = setw(s->d1, w(s->d4));
+
+    if (sw(s->d2) < 0) {
+        if (sw(s->d6) < 0) return;
+        s->d0 = setw(s->d0, w(s->d2));
+        s->d2 = 0;                                   /* moveq */
+        s->d4 = setw(s->d4, (uint16_t)(w(s->d4) + w(s->d0)));
+        s->d0 = setw(s->d0, (uint16_t)(w(s->d0) + w(s->d0)));
+        s->a0 -= (uint32_t)(int32_t)sw(s->d0);
+    }
+    if (sw(s->d5) < 0) {
+        if (sw(s->d7) < 0) return;
+        s->d0 = setw(s->d0, w(s->d5));
+        s->d5 = 0;
+        s->d3 = setw(s->d3, (uint16_t)(w(s->d3) + w(s->d0)));
+        s->d0 = setw(s->d0, (uint16_t)(w(s->d0) + w(s->d0)));
+        s->d0 = muls_w(w(s->d1), w(s->d0));
+        s->a0 -= (uint32_t)(int32_t)sw(s->d0);
+    }
+    if (!(sw(s->d6) - 0x15 < 0)) {
+        if (sw(s->d2) - 0x15 >= 0) return;
+        s->d0 = setw(s->d0, (uint16_t)(w(s->d6) - 0x15));
+        s->d4 = setw(s->d4, (uint16_t)(w(s->d4) - w(s->d0)));
+        pf16(g, A3 + 0x2ffe, 0);
+    }
+    if (w(s->d7) > f16(g, A3 + 0x2f4a)) {            /* bls skips */
+        s->d7 = setw(s->d7, (uint16_t)(w(s->d7) - f16(g, A3 + 0x2f4a)));
+        s->d7 = setw(s->d7, (uint16_t)(w(s->d7) + 1));
+        uint16_t before = w(s->d3);
+        s->d3 = setw(s->d3, (uint16_t)(w(s->d3) - w(s->d7)));
+        if (before <= w(s->d7)) return;              /* sub.w then bls */
+    }
+    if (w(s->d4) == 0) return;
+
+    qw(g, s, f16(g, A3 + 0x2f4e));
+    if (!((int16_t)(f16(g, A3 + 0x2fbc) - 4) < 0))
+        pf16(g, s->a4 - 2, (uint16_t)(f16(g, s->a4 - 2) + 1));
+
+    s->d6 = setw(s->d6, (uint16_t)(w(s->d4) + w(s->d4)));
+    s->d6 = setw(s->d6, (uint16_t)(w(s->d6) - 0x28));
+    s->d6 = setw(s->d6, (uint16_t)(-sw(s->d6)));
+    s->d7 = setw(s->d7, (uint16_t)(w(s->d1) - w(s->d4)));
+    s->d7 = setw(s->d7, (uint16_t)(w(s->d7) + w(s->d7)));
+    s->d7 = setw(s->d7, (uint16_t)(w(s->d7) - 2));
+    s->d0 = setw(s->d0, f16(g, A3 + 0x303a));
+    s->d1 = setw(s->d1, (uint16_t)(w(s->d0) | 0x0fca));
+    qw(g, s, w(s->d1));
+    qw(g, s, w(s->d0));
+    s->d0 = setw(s->d0, (uint16_t)(w(s->d0) | 0x0b0a));
+    if (f16(g, A3 + 0x2ffe) != 0) {
+        s->d6 = setw(s->d6, (uint16_t)(w(s->d6) + 2));
+        s->d7 = setw(s->d7, (uint16_t)(w(s->d7) + 2));
+    }
+    qw(g, s, w(s->d6)); qw(g, s, w(s->d7));
+    qw(g, s, w(s->d7)); qw(g, s, w(s->d6));
+    s->d6 = 0;                                       /* moveq */
+    if (f16(g, A3 + 0x2ffe) != 0) s->d6 = 0xffffffffu;
+    qw(g, s, w(s->d6));
+
+    s->d1 = f32(g, A3 + 0x2f50);                     /* move.l: all 32 */
+    s->a1 = s->a0;
+    s->d6 = setw(s->d6, (uint16_t)(f16(g, A3 + 0x2f4e) - 1));
+    while (w(s->d6) != 0) {
+        s->a0 += s->d1;                              /* adda.l */
+        s->d6 = setw(s->d6, (uint16_t)(w(s->d6) - 1));
+    }
+    s->d2 = setw(s->d2, (uint16_t)(w(s->d2) + w(s->d2)));
+    s->d5 = setw(s->d5, (uint16_t)(w(s->d5) + w(s->d5)));
+    s->d2 = setw(s->d2, (uint16_t)(w(s->d2) +
+                 m16(g, A3 - 0x3d6a + (uint32_t)(int32_t)sw(s->d5))));
+    s->a2 = addaw(s->a2, w(s->d2));
+    s->a2 += f32(g, A3 + 0x2f8a);
+    s->d6 = setw(s->d6, (uint16_t)(w(s->d3) << 6));
+    s->d6 = setw(s->d6, (uint16_t)(w(s->d6) + w(s->d4)));
+    if (f16(g, A3 + 0x2ffe) == 0)
+        s->d6 = setw(s->d6, (uint16_t)(w(s->d6) + 1));
+    s->d4 = setw(s->d4, 0x20d0);
+
+    /* the record variants */
+    uint32_t D1 = (uint32_t)(int32_t)sw(s->d1);
+    uint32_t D4 = (uint32_t)(int32_t)sw(s->d4);
+    if ((int16_t)f16(g, A3 + 0x2fbc) < 0) {          /* $21656c */
+        uint32_t planes = f32(g, A3 + 0x2f4c);
+        if (planes == 1) {                            /* $216608 */
+            pf16(g, s->a4 - 0xe, (uint16_t)((f16(g, s->a4 - 0xe) & 0xf000)
+                                            | 0x0bfa));
+            s->a2 += D4;
+            ql(g,s,s->a1); ql(g,s,s->a2); ql(g,s,s->a2); qw(g,s,w(s->d6));
+            return;
+        }
+        if (planes == 2) {                            /* $2165dc */
+            rec_a1(g, s);
+            s->a2 += D4; qw(g, s, w(s->d0)); rec_no_a1(g, s);
+            s->a2 += D4; rec_no_a1(g, s);
+            s->a2 += D4; rec_no_a1(g, s);
+            return;
+        }
+        if (planes == 3) {                            /* $216620 */
+            rec_a1(g, s);
+            s->a1 += D1; s->a2 += D4; rec_a1(g, s);
+            s->a2 += D4; qw(g, s, w(s->d0)); rec_no_a1(g, s);
+            s->a2 += D4; rec_no_a1(g, s);
+            return;
+        }
+        /* $21658e default */
+        rec_a1(g, s);
+        s->a1 += D1; s->a2 += D4; rec_a1(g, s);
+        s->a1 += D1; s->a2 += D4; rec_a1(g, s);
+        if (planes == 5) {                            /* $2165cc */
+            s->a1 += D1; s->a2 += D4; rec_a1(g, s);
+            return;
+        }
+        s->a2 += D4; qw(g, s, w(s->d0)); rec_no_a1(g, s);
+        return;
+    }
+
+    if (f16(g, A3 + 0x2df8) != 0) {                   /* $2167ce */
+        uint32_t off = (uint32_t)f16(g, A3 + 0x2fbc);
+        off = (uint32_t)(uint16_t)(off - 1) * 0x96fcu;   /* mulu.w */
+        s->a0 += off; s->a1 += off;
+        rec_a1(g, s);
+        for (int i = 0; i < 3; i++) {
+            s->a1 += D1; s->a2 += D4; rec_a1(g, s);
+        }
+        return;
+    }
+
+    switch (f16(g, A3 + 0x2fbc)) {
+    case 1:                                           /* $216652 */
+        s->a0 += s->d1; s->a0 += s->d1;               /* adda.l */
+        s->a1 += D1; s->a1 += D1;
+        rec_a1(g, s);
+        s->a1 -= D1; s->a2 += D4; rec_a1(g, s);
+        s->a1 += D1; s->a1 += D1; s->a1 += D1; s->a2 += D4; rec_a1(g, s);
+        s->a2 += D4; qw(g, s, w(s->d0)); rec_no_a1(g, s);
+        return;
+    case 2:                                           /* $216692 */
+        s->a0 += s->d1; s->a0 += s->d1;
+        rec_a1(g, s);
+        s->a1 += D1; s->a1 += D1; s->a1 += D1; s->a2 += D4; rec_a1(g, s);
+        s->a1 += D1; s->a2 += D4; rec_a1(g, s);
+        s->a2 += D4; qw(g, s, w(s->d0)); rec_no_a1(g, s);
+        return;
+    case 3:                                           /* $2166ce */
+        s->a0 += s->d1; s->a0 += s->d1;
+        s->a1 += D1; s->a1 += D1;
+        rec_a1(g, s);
+        s->a1 += D1; s->a2 += D4; rec_a1(g, s);
+        s->a1 += D1; s->a2 += D4; rec_a1(g, s);
+        s->a2 += D4; qw(g, s, w(s->d0)); rec_no_a1(g, s);
+        return;
+    case 5:                                           /* $21670a */
+        s->a0 += s->d1; s->a0 += s->d1;
+        s->a1 += D1; s->a1 += D1;
+        rec_a1(g, s);
+        s->a1 -= D1; s->a2 += D4; rec_a1(g, s);
+        s->a1 += D1; s->a1 += D1; s->a1 += D1; s->a2 += D4; rec_a1(g, s);
+        s->a1 += D1; s->a1 += D1; s->a2 += D4; rec_a1(g, s);
+        return;
+    case 6:                                           /* $21674e */
+        s->a0 += s->d1; s->a0 += s->d1;
+        rec_a1(g, s);
+        s->a1 += D1; s->a1 += D1; s->a1 += D1; s->a2 += D4; rec_a1(g, s);
+        s->a1 += D1; s->a2 += D4; rec_a1(g, s);
+        s->a1 += D1; s->a1 += D1; s->a2 += D4; rec_a1(g, s);
+        return;
+    default:                                          /* $21678e */
+        s->a0 += s->d1; s->a0 += s->d1;
+        s->a1 += D1; s->a1 += D1;
+        rec_a1(g, s);
+        s->a1 += D1; s->a2 += D4; rec_a1(g, s);
+        s->a1 += D1; s->a2 += D4; rec_a1(g, s);
+        s->a1 += D1; s->a1 += D1; s->a2 += D4; rec_a1(g, s);
+        return;
+    }
 }
