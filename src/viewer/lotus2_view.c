@@ -7,11 +7,8 @@
  *
  * Pages:
  *   PLAY     the game, driven by keyboard/pad
- *   COURSE   the course driven by the game's own road chain, beside a
- *            top-down map, a gradient profile and a whole-course strip
- *   TRACK    the per-frame road geometry the interpolator emits
- *   GEOM     the blit queue road_blitqueue() builds
- *   DISPLAY  chipset display state + the master palette
+ *   COURSE   each course previewed in 3D by the game's own road chain,
+ *            beside a top-down map, a gradient profile and a strip
  *
  * Keys: F2 screenshot, P pause, ESC back to PLAY, arrows+space drive.
  */
@@ -97,7 +94,11 @@ static int course_sel;
 #define COURSE_SEGMENTS 1024
 #define COURSE_RECORD   0x10
 
-enum { MODE_GAME, MODE_COURSE, MODE_TRACK, MODE_GEOM, MODE_DISPLAY };
+/* Two pages: the game, and the course preview (3D road + 2D map,
+ * profile and strip).  The TRACK, GEOM and DISPLAY pages were
+ * scaffolding for porting the render chain; that work is done and
+ * they are gone. */
+enum { MODE_GAME, MODE_COURSE, MODE_COUNT };
 
 /* The game itself is the front page.  This tool used to boot the game
  * only to freeze it the moment the course data landed, which is useful
@@ -157,7 +158,7 @@ static int button(Rectangle r, const char *label, int active)
 
 /* ---- guest reads (big-endian, through the host's memory) ---- */
 static uint16_t r16(uint32_t a) { return (uint16_t)m68k_read_memory_16(a); }
-static int16_t s16(uint32_t a) { return (int16_t)r16(a); }
+__attribute__((unused)) static int16_t s16(uint32_t a) { return (int16_t)r16(a); }
 static uint32_t r32(uint32_t a) { return m68k_read_memory_32(a); }
 
 /* label/value row: label yellow at x, value RAYWHITE at x+dx */
@@ -212,6 +213,9 @@ static uint32_t course_hash(void)
 }
 static const char *course_name(void)
 {
+    /* The snapshot decides which course is on show, so it names it too;
+     * the .l2c's embedded name only applies when there is no snapshot. */
+    if (course_snapshot_table()) return COURSES[course_sel].name;
     if (course_file && course_file_name[0]) return course_file_name;
     switch (course_hash()) {
     case 0x0ff4d6d5u: return "FOREST";
@@ -347,6 +351,9 @@ static float course_rendered_at = -1;
  * road_blitqueue() carries in D7, and 42 is the `adda.w #$2a,A0` the band
  * blitter steps its destination by -- so this is the game's own bitmap
  * geometry, not a guess. */
+/* The HUD (speed bar, position, score, countdown) occupies the top 34
+ * rows of the race screen. */
+#define ROAD_TOP 34
 #define RACE_PLANE_STRIDE 0x20d0
 #define RACE_ROW_STRIDE   42
 #define RACE_PLANES       4
@@ -448,7 +455,7 @@ static void roadplay_load(int course)
     rp_course = course;
     snprintf(rp_note, sizeof rp_note,
              "the game's own road chain in native C  "
-             "(car and scenery are frozen snapshot pixels)");
+             "(road only: the object passes are not ported)");
 }
 
 static const uint8_t *course_snapshot_table(void)
@@ -467,6 +474,37 @@ static void roadplay_draw(int seg)
 
     road_sky(&rp_g);
     road_keyframes_near(&rp_g);
+
+    /* Blank the ground, from the horizon down.  The snapshot's buffer
+     * still holds the frame it was captured on, and the road chain
+     * redraws only part of it, so the car, the HUD and the near trees
+     * were showing through as frozen pixels.  Clearing everything is
+     * wrong the other way: the sky is drawn as bands INTO the bitplanes,
+     * not painted by the copper, so a fully cleared bitmap has a black
+     * sky.  The horizon line the keyframe generator just published
+     * ($30e4) is exactly the boundary between the two. */
+    {
+        uint32_t buf = (f32(&rp_g, A3 + 0x2f8e) + 2) & ~1u;
+        int top = (int16_t)f16(&rp_g, A3 + 0x30e4);
+        if (top < 0) top = 0;
+        if (top > VIEW_H) top = VIEW_H;
+        for (int p = 0; p < RACE_PLANES; p++) {
+            uint32_t plane = buf + (uint32_t)p * RACE_PLANE_STRIDE;
+            uint32_t at = plane + (uint32_t)top * RACE_ROW_STRIDE;
+            size_t span = (size_t)(VIEW_H - top) * RACE_ROW_STRIDE;
+            if (at >= 0x400 && at + span <= GUEST_CHIP_SIZE)
+                memset(rp_g.chip + at, 0, span);
+            /* and the HUD band, which is above the horizon and would
+             * otherwise sit over the preview showing a frozen speed,
+             * position and score */
+            /* 34 rows is the HUD's own band, but the position and
+             * lap digits hang below it, so the preview clears further */
+            size_t hud = (size_t)(ROAD_TOP + 24) * RACE_ROW_STRIDE;
+            if (plane >= 0x400 && plane + hud <= GUEST_CHIP_SIZE)
+                memset(rp_g.chip + plane, 0, hud);
+        }
+    }
+
     road_interpolate(&rp_g, 0);
     road_band_bounds(&rp_g, RP_VIEW);
     road_perspective_near(&rp_g, f16(&rp_g, RP_VIEW + 0x98));
@@ -795,9 +833,6 @@ static void render_road_frame(int segment)
  * frame -- measured by the render gate, which proves that window is
  * pixel-identical to the native compositor's output.
  */
-/* The HUD (speed bar, position, score, countdown) occupies the top 34
- * rows of the race screen; the road view crops below it. */
-#define ROAD_TOP 34
 
 
 static void course_draw_3d(Rectangle r)
@@ -1123,153 +1158,6 @@ static void page_course(void)
     if (course_scrub > COURSE_SEGMENTS - 1) course_scrub = 0;
 }
 
-/* ---- TRACK: the per-frame road geometry ----------------------------- */
-static void page_track(void)
-{
-    char buf[160];
-    int count = r16(A3 + 0x30ce);
-    int lines = r16(A3 + 0x2eaa);
-
-    page_head("TRACK");
-    int x0 = 16, y0 = 62;
-    snprintf(buf, sizeof buf, "%d", count);
-    kv(x0, y0, "keyframes", buf, 150);
-    snprintf(buf, sizeof buf, "%d", lines);
-    kv(x0, y0 + 24, "road lines", buf, 150);
-    snprintf(buf, sizeof buf, "%d", s16(A3 + 0x30e4));
-    kv(x0, y0 + 48, "horizon line", buf, 150);
-    snprintf(buf, sizeof buf, "$%04x", r16(A3 + 0x2ff4));
-    kv(x0, y0 + 72, "zoom step", buf, 150);
-
-    ui_text("KEYFRAMES", 16, 170, 22, LABEL);
-    ui_text("dist    line     idx", 150, 170, 20, LIGHTGRAY);
-    int ky = 196;
-    for (int i = 0; i < 10 && i < count; i++) {
-        uint32_t at = A3 - 0x2278 + (uint32_t)i * 8;
-        snprintf(buf, sizeof buf, "%6d  %6d  %6d", s16(at), s16(at + 2),
-                 s16(at + 6));
-        ui_text(buf, 150, ky, 20, RAYWHITE);
-        ky += 22;
-    }
-
-    /* road ribbon from the interpolator's line stream */
-    Rectangle plot = {WIN_W / 2, 170, WIN_W / 2 - 16, WIN_H - BAR_H - 200};
-    DrawRectangleRec(plot, PANEL_BG);
-    DrawRectangleLinesEx(plot, 1, GRID);
-    DrawLine(plot.x + plot.width / 2, plot.y,
-             plot.x + plot.width / 2, plot.y + plot.height, GRID);
-    ui_text("ROAD EDGE STREAM", (int)plot.x, 146, 22, LABEL);
-    uint32_t stream = A3 - 0x2bd8;
-    int shown = lines > 0 ? lines : 0;
-    for (int i = 0; i < shown; i++) {
-        uint32_t at = stream + (uint32_t)i * 6;
-        int colour = s16(at), edge = s16(at + 2);
-        float ex = plot.x + plot.width / 2.0f
-                 + edge * (plot.width / 2.0f) / 512.0f;
-        if (ex < plot.x) ex = plot.x;
-        if (ex > plot.x + plot.width - 2) ex = plot.x + plot.width - 2;
-        float ey = plot.y + plot.height - 1
-                 - i * (plot.height / (float)shown);
-        DrawRectangleV((Vector2){ex, ey}, (Vector2){2, 2},
-                       (colour & 0x40) ? LABEL : SKYBLUE);
-    }
-    ui_text("yellow = marked band   blue = edge", (int)plot.x,
-            (int)(plot.y + plot.height + 6), 18, LIGHTGRAY);
-}
-
-/* ---- GEOM: the blit queue road_blitqueue() builds -------------------- */
-static void page_geom(void)
-{
-    char buf[160];
-    page_head("GEOMETRY");
-    uint32_t queue = r32(A3 + 0x2f42);
-    int x0 = 16, y0 = 62;
-    snprintf(buf, sizeof buf, "$%06x", queue);
-    kv(x0, y0, "blit queue", buf, 150);
-    snprintf(buf, sizeof buf, "in %u   out %u", r16(A3 + 0x2fa4),
-             r16(A3 + 0x2fa8));
-    kv(x0, y0 + 24, "watermarks", buf, 150);
-    snprintf(buf, sizeof buf, "%ld", swiv_blit_count);
-    kv(x0, y0 + 48, "blits", buf, 150);
-
-    ui_text("RECORDS", 16, 140, 22, LABEL);
-    ui_text("source     size", 150, 140, 20, LIGHTGRAY);
-    int ry = 166;
-    for (int i = 0; i < 18; i++) {
-        uint32_t at = queue + (uint32_t)i * 6;
-        uint32_t src = r32(at);
-        if (src == 0xffffffffu)
-            ui_text("-- sentinel --", 150, ry, 20, (Color){250, 160, 90, 255});
-        else {
-            snprintf(buf, sizeof buf, "$%06x   $%04x", src, r16(at + 4));
-            ui_text(buf, 150, ry, 20, RAYWHITE);
-        }
-        ry += 22;
-    }
-
-    int bx = WIN_W / 2 + 40;
-    ui_text("BAND ENABLES", bx, 140, 22, LABEL);
-    static const struct { uint32_t off; const char *name; } bands[] = {
-        {0x30f0, "horizon"}, {0x30e8, "shadow"}, {0x30ee, "verge"},
-        {0x30ea, "scenery"}, {0x30ec, "verge y"}, {0x30e6, "src line"},
-        {0x30e2, "segment pos"},
-    };
-    int by = 166;
-    for (unsigned i = 0; i < sizeof bands / sizeof bands[0]; i++) {
-        snprintf(buf, sizeof buf, "%u", r16(A3 + bands[i].off));
-        kv(bx, by, bands[i].name, buf, 150);
-        by += 24;
-    }
-}
-
-/* ---- DISPLAY: chipset state + palette -------------------------------- */
-static void page_display(void)
-{
-    char buf[160];
-    uint16_t bplcon0, dmacon, diwstrt, diwstop;
-    amiga_display_state(&bplcon0, &dmacon, &diwstrt, &diwstop);
-    page_head("DISPLAY");
-    int x0 = 16, y0 = 62;
-    snprintf(buf, sizeof buf, "$%04x   %d planes", bplcon0,
-             (bplcon0 >> 12) & 7);
-    kv(x0, y0, "bplcon0", buf, 150);
-    snprintf(buf, sizeof buf, "$%04x", dmacon);
-    kv(x0, y0 + 24, "dmacon", buf, 150);
-    snprintf(buf, sizeof buf, "$%04x - $%04x", diwstrt, diwstop);
-    kv(x0, y0 + 48, "window", buf, 150);
-    snprintf(buf, sizeof buf, "$%06x   $%06x", r32(A3 + 0x2fd6),
-             r32(A3 + 0x2fda));
-    kv(x0, y0 + 72, "screens", buf, 150);
-    snprintf(buf, sizeof buf, "$%04x", r16(A3 + 0x2fe0));
-    kv(x0, y0 + 96, "phase", buf, 150);
-    snprintf(buf, sizeof buf, "%ld", swiv_copper_moves);
-    kv(x0, y0 + 120, "copper moves", buf, 150);
-
-    ui_text("MASTER PALETTE  $320c", 16, 220, 22, LABEL);
-    for (int i = 0; i < 32; i++) {
-        uint16_t c = r16(A3 + 0x320c + (uint32_t)i * 2);
-        int cx = 16 + (i % 16) * 44, cy = 250 + (i / 16) * 52;
-        DrawRectangle(cx, cy, 40, 40,
-                      (Color){(unsigned char)(((c >> 8) & 15) * 17),
-                              (unsigned char)(((c >> 4) & 15) * 17),
-                              (unsigned char)((c & 15) * 17), 255});
-        DrawRectangleLines(cx, cy, 40, 40, GRID);
-    }
-    ui_text("COPPER PALETTE  $7ff74 (live operands)", 16, 360, 22, LABEL);
-    for (int i = 0; i < 32; i++) {
-        uint16_t c = (uint16_t)m68k_read_memory_16(0x7ff74 + 2 + i * 4);
-        int cx = 16 + (i % 16) * 44, cy = 390 + (i / 16) * 52;
-        DrawRectangle(cx, cy, 40, 40,
-                      (Color){(unsigned char)(((c >> 8) & 15) * 17),
-                              (unsigned char)(((c >> 4) & 15) * 17),
-                              (unsigned char)((c & 15) * 17), 255});
-        DrawRectangleLines(cx, cy, 40, 40, GRID);
-    }
-}
-
-/* The game, scaled to fit, with a one-line status strip.  Everything the
- * debug pages show is still a keypress away; this is just the thing you
- * actually play. */
 /* Set by page_game when the panel's DEBUG button is clicked. */
 static int game_debug_clicked;
 /* --bezel: the play front end's surround on the game page, so `make play`
@@ -1306,16 +1194,21 @@ static void page_game(void)
                       26 + (WIN_H - 26 - SCREEN_H * s) / 2,
                       SCREEN_W * s, SCREEN_H * s };
     DrawTexturePro(game_screen, src, dst, (Vector2){0, 0}, 0.0f, WHITE);
-    ui_text("1 GAME   2 COURSE   3 TRACK   4 GEOM   5 DISPLAY   "
-            "F5 freeze   F11 full   P pause   |   pad SELECT pages",
-            16, 4, 18, LABEL);
+    ui_text("1 GAME   2 COURSES   F5 freeze   F11 full   P pause   "
+            "|   pad SELECT pages", 16, 4, 18, LABEL);
 }
 
 int main(int argc, char **argv)
 {
     WhdConfig whd = { .dir = "original/Lotus2CD32",
                       .slave = "Lotus2CD32.slave" };
-    long fire_from = 2100, fire_period = 100, shot_at = -1;
+    /* Auto-fire is OFF unless asked for.  It used to default to "press
+     * fire every 100 frames from frame 2100", which is how the capture
+     * runs drive themselves into a race -- and it does not stop at the
+     * race.  On a menu it keeps choosing things: pick VIEW EXTRAS, wait,
+     * and the harness starts a game for you.  Anything that needs it
+     * passes --fire-from explicitly. */
+    long fire_from = -1, fire_period = 100, shot_at = -1;
     const char *shot_path = NULL;
     int mode = MODE_GAME, shot_mode = MODE_GAME;
     const char *course_path = "re/pipeline/course_forest.l2c";
@@ -1349,11 +1242,7 @@ int main(int argc, char **argv)
         }
         else if (!strcmp(argv[i], "--page") && i + 1 < argc) {
             const char *w = argv[++i];
-            shot_mode = !strcmp(w, "GAME")    ? MODE_GAME
-                      : !strcmp(w, "COURSE")  ? MODE_COURSE
-                      : !strcmp(w, "TRACK")   ? MODE_TRACK
-                      : !strcmp(w, "GEOM")    ? MODE_GEOM
-                      : MODE_DISPLAY;
+            shot_mode = !strcmp(w, "COURSE") ? MODE_COURSE : MODE_GAME;
         }
         else {
             fprintf(stderr,
@@ -1450,9 +1339,6 @@ int main(int argc, char **argv)
         if (IsKeyPressed(KEY_F11)) ToggleFullscreen();
         if (IsKeyPressed(KEY_ONE))   mode = MODE_GAME;
         if (IsKeyPressed(KEY_TWO))   mode = MODE_COURSE;
-        if (IsKeyPressed(KEY_THREE)) mode = MODE_TRACK;
-        if (IsKeyPressed(KEY_FOUR))  mode = MODE_GEOM;
-        if (IsKeyPressed(KEY_FIVE))  mode = MODE_DISPLAY;
         /* D from the play screen, or the panel's DEBUG button */
         if (mode == MODE_GAME && (IsKeyPressed(KEY_D) || game_debug_clicked))
             mode = MODE_COURSE;
@@ -1462,7 +1348,7 @@ int main(int argc, char **argv)
          * zoom), so paging lives on SELECT and START. */
         if (IsGamepadAvailable(0)) {
             if (IsGamepadButtonPressed(0, GAMEPAD_BUTTON_MIDDLE_LEFT))
-                mode = (mode + 1) % (MODE_DISPLAY + 1);
+                mode = (mode + 1) % MODE_COUNT;
             if (IsGamepadButtonPressed(0, GAMEPAD_BUTTON_MIDDLE_RIGHT))
                 mode = MODE_GAME;
             if (IsGamepadButtonPressed(0, GAMEPAD_BUTTON_MIDDLE))
@@ -1476,7 +1362,13 @@ int main(int argc, char **argv)
 
         if (!offline && !paused && !frozen) {
             js_poll();
-            uint8_t stick = keyboard_stick(true) | gamepad_stick(0);
+            /* Only the game page steers the game.  The debug pages use
+             * the same arrows, stick and buttons to scrub and zoom, and
+             * those were reaching the guest as well -- so scrubbing the
+             * course on the COURSE page was also working the menu behind
+             * it, and starting a race. */
+            uint8_t stick = mode == MODE_GAME
+                          ? (keyboard_stick(true) | gamepad_stick(0)) : 0;
             if (fire_from >= 0 && swiv_frame_no >= fire_from)
                 stick |= fire_period
                     ? (((swiv_frame_no / fire_period) % 2) ? 0x10 : 0x00)
@@ -1505,11 +1397,8 @@ int main(int argc, char **argv)
         ClearBackground(BAR_BG);
 
         switch (mode) {
-        case MODE_GAME:    page_game(); break;
         case MODE_COURSE:  page_course(); break;
-        case MODE_TRACK:   page_track(); break;
-        case MODE_GEOM:    page_geom(); break;
-        default:           page_display(); break;
+        default:           page_game(); break;
         }
 
         /* --- control bar --- */
@@ -1523,14 +1412,10 @@ int main(int argc, char **argv)
                  COURSE_SEGMENTS, swiv_blit_count, paused ? "   PAUSED" : "");
         ui_text(status, 8, by + 4, 16, RAYWHITE);
 
-        if (button((Rectangle){8, r1, 120, bh}, "COURSE",
+        if (button((Rectangle){8, r1, 120, bh}, "GAME",
+                   mode == MODE_GAME)) mode = MODE_GAME;
+        if (button((Rectangle){136, r1, 160, bh}, "COURSES",
                    mode == MODE_COURSE)) mode = MODE_COURSE;
-        if (button((Rectangle){136, r1, 110, bh}, "TRACK",
-                   mode == MODE_TRACK)) mode = MODE_TRACK;
-        if (button((Rectangle){254, r1, 110, bh}, "GEOM",
-                   mode == MODE_GEOM)) mode = MODE_GEOM;
-        if (button((Rectangle){372, r1, 130, bh}, "DISPLAY",
-                   mode == MODE_DISPLAY)) mode = MODE_DISPLAY;
         if (button((Rectangle){WIN_W - 108, r1, 100, bh},
                    paused ? "RESUME" : "PAUSE", paused)) paused = !paused;
         if (button((Rectangle){WIN_W - 216, r1, 100, bh}, "SHOT", 0)) {
@@ -1539,7 +1424,7 @@ int main(int argc, char **argv)
             UnloadImage(s);
         }
         ui_text("P pause emulation   F2 screenshot   [ ] scrub   "
-                "pad: SELECT next page, START game page",
+                "pad: SELECT swaps page",
                 8, (int)r2 + 12, 18, LIGHTGRAY);
         EndTextureMode();
 

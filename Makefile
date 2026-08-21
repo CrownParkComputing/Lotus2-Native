@@ -115,10 +115,13 @@ play-min: build/lotus2_game
 	./build/lotus2_game --dir $(INSTALL) \
 		$(if $(RECORD),--record $(RECORD))
 
-# Play with the debug pages one keypress away: 1 GAME, 2 COURSE,
-# 3 TRACK, 4 GEOM, 5 DISPLAY; F5 freezes the emulation to read state.
+# The same window as `make play`, but driving itself into a race with
+# auto-fire so the pages have live race state without anyone steering.
+# Auto-fire does not stop at the race -- on a menu it keeps choosing
+# things -- so it is off in `make play`.
 debug: build/lotus2_play
-	./build/lotus2_play --live --bezel --dir $(INSTALL)
+	./build/lotus2_play --live --bezel --dir $(INSTALL) \
+		--fire-from 2100 --fire-period 100
 
 # The debug viewer driven by recompiled C (map/track/geometry pages).
 build/lotus2_play: src/viewer/lotus2_view.c $(HOST) $(HOST_H) \
@@ -157,7 +160,8 @@ view: build/lotus2_view re/pipeline/course_forest.l2c
 # Live session instead: boots the game, drives into a race, then freezes
 # so the TRACK / GEOM / DISPLAY pages have real guest state to read.
 view-race: build/lotus2_view
-	./build/lotus2_view --live --dir $(INSTALL)
+	./build/lotus2_view --live --dir $(INSTALL) \
+		--fire-from 2100 --fire-period 100
 
 # Extract a standalone course from a road snapshot (needs make road-capture).
 re/pipeline/course_forest.l2c: tools/course_extract.py \
