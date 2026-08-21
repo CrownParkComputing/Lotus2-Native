@@ -433,6 +433,8 @@ static void road_pc_hook(unsigned int pc)
 /* Markings and weather, drawn natively over the composited frame. */
 static void road_markings(Game *g, uint32_t *img);
 static void weather_native(uint32_t *img, int kind, int count);
+static void atmosphere_native(uint32_t *img, int course);
+static void sky_despeckle(uint32_t *img);
 static int road_extras = 1;
 
 /* ---- native track player --------------------------------------------
@@ -668,11 +670,15 @@ static void roadplay_draw(float where)
     }
     if (use && composite(rp_g.chip, use, road_img) == 0) {
         road_valid = 1;
+        /* SNOW and STORM ship with weather painted into the frame;
+         * with a simulation running that would be two lots of it. */
+        if (rp_course == 3 || rp_course == 7) sky_despeckle(road_img);
         road_markings(&rp_g, road_img);
         /* SNOW and STORM get weather; the rest of the courses have none
          * and inventing some would be a different game. */
+        atmosphere_native(road_img, rp_course);
         weather_native(road_img, rp_course == 7 ? 1 : rp_course == 3 ? 2 : 0,
-                       rp_course == 7 ? 420 : 260);
+                       rp_course == 7 ? 900 : 650);
         /* LOTUS2_EDGES: print, for each drawn line, the record the road
          * chain produced beside the edges that actually came out.  The
          * mapping from `line` to a screen x is the one thing the
@@ -1144,6 +1150,163 @@ void weather_native(uint32_t *img, int kind, int count)
                    (int)(d->y - d->vy * t * 0.35f), tint);
         } else {
             px(img, x, y0, tint);
+        }
+    }
+}
+
+
+/* Take the game's BAKED weather out of the picture.
+ *
+ * The captured frame for SNOW and STORM has the 68000's own snow and
+ * rain drawn into it, and now that the weather is simulated that would
+ * be two lots of it -- one falling, one nailed to the backdrop.  The
+ * baked kind is one pixel wide and its neighbours agree with each other,
+ * which is exactly what a despeckle removes; clouds, hills, trees and
+ * the road are all wider than that and survive.
+ *
+ * Horizontal first, then vertical, because rain is drawn as one-pixel
+ * vertical streaks and snow as single dots.
+ */
+static void sky_despeckle(uint32_t *img)
+{
+    static uint32_t tmp[VIEW_W * VIEW_H];
+    memcpy(tmp, img, sizeof tmp);
+    for (int y = 0; y < VIEW_H; y++)
+        for (int x = 1; x < VIEW_W - 1; x++) {
+            uint32_t l = tmp[y * VIEW_W + x - 1], c = tmp[y * VIEW_W + x];
+            uint32_t r = tmp[y * VIEW_W + x + 1];
+            if (c != l && l == r) img[y * VIEW_W + x] = l;
+        }
+    memcpy(tmp, img, sizeof tmp);
+    for (int y = 1; y < VIEW_H - 1; y++)
+        for (int x = 0; x < VIEW_W; x++) {
+            uint32_t u = tmp[(y - 1) * VIEW_W + x], c = tmp[y * VIEW_W + x];
+            uint32_t d = tmp[(y + 1) * VIEW_W + x];
+            if (c != u && u == d) img[y * VIEW_W + x] = u;
+        }
+}
+
+/* ---- atmosphere ------------------------------------------------------
+ * Fog and night are the two the original gets least out of.  Fog is a
+ * flat grey band and night is a dark palette; neither has any DEPTH to
+ * it, because depth costs cycles a 68000 does not have spare.
+ *
+ * We already know the depth of every row for nothing: the road is 1/z
+ * wide, so z falls straight out of the width the road chain published.
+ * Everything below is that one number spent well.
+ *
+ * All of it stays inside the frame's own palette range -- these blend
+ * and scale what the game drew rather than painting over it, so a fogged
+ * FOREST still looks like Lotus 2 and not like a grey rectangle.
+ */
+static float atm_depth[VIEW_H];      /* 0 at the camera, 1 at the horizon */
+static int atm_have[VIEW_H];
+
+static void atm_read_depth(void)
+{
+    for (int i = 0; i < VIEW_H; i++) atm_have[i] = 0;
+    float wmax = 1.0f;
+    for (uint16_t y = road_first; y < road_limit; y++)
+        if (road_edge[y].have) {
+            float w = road_edge[y].r - road_edge[y].l;
+            if (w > wmax) wmax = w;
+        }
+    for (uint16_t y = road_first; y < road_limit; y++) {
+        if (!road_edge[y].have) continue;
+        float w = road_edge[y].r - road_edge[y].l;
+        if (w < 1) w = 1;
+        /* z ~ 1/w, normalised so the widest row on screen is z = 0 */
+        float z = (wmax / w - 1.0f) / 12.0f;
+        if (z < 0) z = 0;
+        if (z > 1) z = 1;
+        atm_depth[y] = z;
+        atm_have[y] = 1;
+    }
+}
+
+static void unpack(uint32_t v, int *r, int *g, int *b)
+{   /* the host packs blue high, red low */
+    *r = v & 0xff; *g = (v >> 8) & 0xff; *b = (v >> 16) & 0xff;
+}
+static uint32_t pack(int r, int g, int b)
+{
+    if (r < 0) r = 0; if (r > 255) r = 255;
+    if (g < 0) g = 0; if (g > 255) g = 255;
+    if (b < 0) b = 0; if (b > 255) b = 255;
+    return 0xff000000u | (uint32_t)r | ((uint32_t)g << 8) | ((uint32_t)b << 16);
+}
+
+/* A flash that fires now and then, for the storm.  Returns 0..1. */
+static float atm_lightning(void)
+{
+    static int until, next = 40;
+    static float level;
+    if (--next <= 0) {
+        /* a strike every two to five seconds at 50 Hz, lasting two to
+         * four frames, sometimes a double */
+        next = 100 + (int)(wx_rand() * 180.0f);
+        until = 2 + (int)(wx_rand() * 3.0f);
+        level = 0.55f + wx_rand() * 0.45f;
+    }
+    if (until > 0) {
+        until--;
+        if (getenv("LOTUS2_WX")) fprintf(stderr, "lightning %.2f\n", level);
+        return level;
+    }
+    return 0.0f;
+}
+
+/* `course`: 1 NIGHT, 2 FOG, 7 STORM; anything else is left alone. */
+void atmosphere_native(uint32_t *img, int course)
+{
+    if (!road_extras) return;
+    atm_read_depth();
+
+    float flash = (course == 7) ? atm_lightning() : 0.0f;
+
+    for (int y = 0; y < VIEW_H; y++) {
+        /* above the road the depth is the horizon's */
+        float z = atm_have[y] ? atm_depth[y] : 1.0f;
+        uint32_t *row = img + y * VIEW_W;
+
+        for (int x = 0; x < VIEW_W; x++) {
+            int r, g, b;
+            unpack(row[x], &r, &g, &b);
+
+            if (course == 2) {
+                /* FOG: thickens with distance, and a little with height,
+                 * so it sits in the valley rather than hanging flat */
+                float t = z * 0.92f;
+                if (t > 0.92f) t = 0.92f;
+                const int FR = 196, FG = 200, FB = 206;
+                r += (int)((FR - r) * t);
+                g += (int)((FG - g) * t);
+                b += (int)((FB - b) * t);
+            } else if (course == 1) {
+                /* NIGHT: everything falls away with distance, and the
+                 * headlights put a wedge of light on the road ahead --
+                 * which the original has no notion of at all */
+                float dark = 1.0f - z * 0.72f;
+                float lit = 0.0f;
+                if (atm_have[y]) {
+                    float c = (road_edge[y].l + road_edge[y].r) * 0.5f;
+                    float half = (road_edge[y].r - road_edge[y].l) * 0.5f;
+                    float d = fabsf(x - c) / (half * 2.4f + 1.0f);
+                    if (d < 1.0f) lit = (1.0f - d) * (1.0f - z) * 0.85f;
+                }
+                float k = dark + lit;
+                r = (int)(r * k + lit * 40);
+                g = (int)(g * k + lit * 38);
+                b = (int)(b * k + lit * 26);
+            }
+
+            if (flash > 0.0f) {
+                float k = 1.0f + flash * (0.9f - z * 0.35f);
+                r = (int)(r * k + flash * 34);
+                g = (int)(g * k + flash * 34);
+                b = (int)(b * k + flash * 46);
+            }
+            row[x] = pack(r, g, b);
         }
     }
 }
