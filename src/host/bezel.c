@@ -157,9 +157,19 @@ int bezel_panels(Bezel *b, int fps, int natives, int want_debug_btn,
             ROW("F2       SCREENSHOT", 0, BODYHUE);
             ROW("ESC      QUIT", 0, BODYHUE);
         } else {
-            ROW("THIS BUILD", 0, HEADHUE);
-            ROW("68000 RECOMPILED TO C", 0, BODYHUE);
-            ROW("NO EMULATOR LINKED IN", 0, BODYHUE);
+            /* The passwords, because they are what actually gets you to
+             * a course and hunting for them on a bit of paper is worse
+             * than any menu I could put in front of you.  FOREST is
+             * where the game starts, so it has none. */
+            ROW("PASSWORDS", 0, HEADHUE);
+            ROW("NIGHT     TWILIGHT", 0, BODYHUE);
+            ROW("FOG       PEA SOUP", 0, BODYHUE);
+            ROW("SNOW      THE SKIDS", 0, BODYHUE);
+            ROW("DESERT    PEACHES", 0, BODYHUE);
+            ROW("MOTORWAY  LIVER POOL", 0, BODYHUE);
+            ROW("MARSH     BAGLEY", 0, BODYHUE);
+            ROW("STORM     E BOW", 0, BODYHUE);
+            ROW("", 0, BODYHUE);
             ROW(natbuf, 0, BODYHUE);
             ROW(fpsbuf, 0, hue);
         }

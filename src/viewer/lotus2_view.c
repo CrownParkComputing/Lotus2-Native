@@ -1258,7 +1258,11 @@ static int intro_photo(Rectangle *src)
         if (lit < 8) dark++;
         if (lit > 120) { if (first < 0) first = y; last = y; }
     }
-    if (first < 0 || last - first < 50) return 0;
+    /* Big enough to BE the course photograph.  The Gremlin logo is also
+     * a bright block on black and it was being blown up to fill the
+     * screen, which is what happens when a detector describes a shape
+     * loosely enough to catch two things. */
+    if (first < 0 || last - first < 70) return 0;
     if (dark < GAME_H / 3) return 0;          /* a race frame is not black */
 
     int l = -1, r = -1;
@@ -1269,7 +1273,7 @@ static int intro_photo(Rectangle *src)
                  0x00ffffffu)) lit++;
         if (lit > (last - first) / 3) { if (l < 0) l = x; r = x; }
     }
-    if (l < 0 || r - l < 80) return 0;
+    if (l < 0 || r - l < 140) return 0;
     /* inside the frame, not on it */
     *src = (Rectangle){GAME_OX + l + 2, GAME_OY + first + 2,
                        (float)(r - l - 3), (float)(last - first - 3)};
@@ -1916,21 +1920,6 @@ static void page_course(void)
     /* Always driving.  Scrubbing is how you choose WHERE on the course
      * to be; it should not also have to be how you make the road move,
      * so there is no separate DRIVE toggle any more. */
-    /* Race it, without going near the password screen. */
-    {
-        Rectangle rb = {WIN_W - 520, 112, 240, 30};
-        Rectangle sb = {WIN_W - 270, 112, 250, 30};
-        char lbl[64];
-        snprintf(lbl, sizeof lbl, "RACE %s", COURSES[course_sel].name);
-        if (button(rb, lbl, 0)) sel_request = course_sel + 1;
-        /* The series is what the game does on its own: finish a stage
-         * and it moves to the next.  So this is "start at the
-         * beginning", and the game handles the rest -- there is no
-         * sequencing here pretending to be a feature. */
-        if (button(sb, "RACE FROM THE START", sel_series))
-            sel_request = -1;
-    }
-
     float cy = 866, ch = 44;
     ui_text("SPEED", 20, (int)cy + 12, 20, LABEL);
     static const float SPEEDS[] = {SEG_PER_FRAME * 0.25f,
@@ -2362,67 +2351,6 @@ static void page_sound(void)
     ui_text("MUTE silences one voice, SOLO silences the other three -- "
             "in the mix only; the game is untouched",
             16, WIN_H - BAR_H - 26, 18, LIGHTGRAY);
-}
-
-/* ---- loading a course, rather than driving the menus -----------------
- * The right question was "why not just load the level?", and the answer
- * is that we can: `make course-snaps` already captures a full RAM image
- * of a race in each of the eight, because the gates need them.  Loading
- * one back is a save state -- chip RAM, the expansion RAM, the CPU's
- * registers -- and it puts you in that course now, with no menus driven
- * and nothing typed.
- *
- * What it cannot do is put you on the START LINE: the images are taken a
- * few seconds into a race, because that is where a gate needs them.  A
- * start-line set would be its own capture, at the frame the countdown
- * ends.
- */
-static int sel_load_state(int course)
-{
-    static const char *const NAMES[COURSE_COUNT] = {
-        "forest", "night", "fog", "snow", "desert", "motorway", "marsh",
-        "storm"
-    };
-    if (course < 0 || course >= COURSE_COUNT) return 0;
-    char fp[256], cp[256], rp[256];
-    snprintf(fp, sizeof fp, "re/pipeline/courses/%s_0_211e78_fast.bin",
-             NAMES[course]);
-    snprintf(cp, sizeof cp, "re/pipeline/courses/%s_0_211e78_chip.bin",
-             NAMES[course]);
-    snprintf(rp, sizeof rp, "re/pipeline/courses/%s_0_211e78.regs",
-             NAMES[course]);
-
-    FILE *f = fopen(fp, "rb"), *c = fopen(cp, "rb"), *r = fopen(rp, "r");
-    if (!f || !c || !r) {
-        if (f) fclose(f);
-        if (c) fclose(c);
-        if (r) fclose(r);
-        fprintf(stderr, "no state for %s -- run make course-snaps\n",
-                NAMES[course]);
-        return 0;
-    }
-    /* the host's window is smaller than the dumped image; the game lives
-     * in the bottom of it */
-    fread(fast, 1, FAST_SIZE, f);
-    fread(chip, 1, CHIP_SIZE, c);
-    fclose(f);
-    fclose(c);
-
-    char name[32];
-    unsigned val;
-    while (fscanf(r, "%31s %x", name, &val) == 2) {
-        static const char *const D = "d0d1d2d3d4d5d6d7";
-        static const char *const A = "a0a1a2a3a4a5a6a7";
-        if (!strcmp(name, "pc")) cpu_set_reg(CPU_REG_PC, val);
-        else if (!strcmp(name, "sr")) cpu_set_reg(CPU_REG_SR, val);
-        else if (name[0] == 'd' && name[1] >= '0' && name[1] <= '7' && !name[2])
-            cpu_set_reg(CPU_REG_D0 + (name[1] - '0'), val), (void)D;
-        else if (name[0] == 'a' && name[1] >= '0' && name[1] <= '7' && !name[2])
-            cpu_set_reg(CPU_REG_A0 + (name[1] - '0'), val), (void)A;
-    }
-    fclose(r);
-    SetTargetFPS(50);
-    return 1;
 }
 
 /* ---- start any course, without typing a password ---------------------
@@ -2898,13 +2826,6 @@ int main(int argc, char **argv)
         if (IsKeyPressed(KEY_F11)) ToggleFullscreen();
         if (IsKeyPressed(KEY_ONE))   mode = MODE_GAME;
         if (IsKeyPressed(KEY_TWO))   mode = MODE_COURSE;
-        if (sel_request) {
-            int want = sel_request;
-            sel_request = 0;
-            sel_series = (want < 0);
-            int course = sel_series ? 0 : want - 1;
-            if (sel_load_state(course)) mode = MODE_GAME;
-        }
         /* the series: when a course's replay has handed over and the
          * next one is asked for, it starts from the top of the boot */
         if (IsKeyPressed(KEY_F4)) road_extras = !road_extras;
@@ -2933,9 +2854,14 @@ int main(int argc, char **argv)
          * X on an SDL-style layout (0 A, 1 B, 2 X, 3 Y). */
         int pad_x_edge = js_edge(0, 2);
 
+        /* Not during a race.  The pages freeze or read the guest and
+         * neither belongs in the middle of a lap; X is also a button on
+         * the pad, which makes it easy to hit by accident at speed. */
         if (IsKeyPressed(KEY_X) || IsKeyPressed(KEY_D) || pad_x_edge ||
-            want_debug)
-            mode = (mode == MODE_GAME) ? MODE_COURSE : MODE_GAME;
+            want_debug) {
+            if (mode != MODE_GAME) mode = MODE_GAME;
+            else if (!race_on_screen()) mode = MODE_COURSE;
+        }
         /* the pad's shoulder buttons walk the debug pages once you are
          * in them; on the game page they belong to the game */
         if (mode != MODE_GAME) {
