@@ -1243,6 +1243,10 @@ static void kbd_pump(void)
 {
     if (kbd_head == kbd_tail) return;
     if (kbd_pending) { swiv_keys_blocked++; return; }
+    /* Wait for an ICR window with nothing else pending.  The handler
+     * tests Timer A first and returns, so a byte sharing that window is
+     * dropped and the ICR read has already cleared its flag. */
+    if (ciaa_icr_flags) { swiv_keys_blocked++; return; }
     swiv_keys_delivered++;
     uint8_t code = kbd_queue[kbd_head];
     kbd_head = (kbd_head + 1) % (int)sizeof kbd_queue;
@@ -1262,6 +1266,7 @@ static void kbd_age(void)
 {
     if (!kbd_pending) return;
     if (++kbd_pending_age < KBD_RESEND_FRAMES) return;
+    if (ciaa_icr_flags) return;         /* still noisy; wait for a gap */
     kbd_pending_age = 0;
     ciaa_icr_flags |= 0x08;
     intreq |= 0x0008;

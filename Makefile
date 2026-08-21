@@ -296,13 +296,39 @@ build/dasm: tools/dasm.c $(MUSASHI_DIR)/m68kdasm.c
 # leaves every night-course instruction with a guessed cost, and the small
 # errors accumulate into a one-frame lag that shows up as the game taking
 # a different path -- which is exactly how the night course first failed.
-re/pipeline/cycles.txt: build/lotus2 re/pipeline/night.rec
+# Measured on EVERY course we can reach.  A table measured only on FOREST
+# leaves the other courses' instructions with guessed costs, and the small
+# errors accumulate into a one-frame lag that sends the game down a
+# different path -- which is how night, fog and snow each first failed.
+COURSES = night fog snow desert marsh storm
+re/pipeline/cycles.txt: build/lotus2 $(wildcard re/pipeline/courses/*.rec)
 	SWIV_CYCLES=build/cyc_forest.txt ./build/lotus2 --dir $(INSTALL) \
 		--frames 9000 --fire-from 2100 --fire-period 100 >/dev/null 2>&1
-	SWIV_CYCLES=build/cyc_night.txt ./build/lotus2 --dir $(INSTALL) \
-		--frames 6500 --replay re/pipeline/night.rec \
-		--keys re/pipeline/night.keys >/dev/null 2>&1
-	cat build/cyc_forest.txt build/cyc_night.txt | sort -u -k1,2 > $@
+	@for c in $(COURSES); do \
+		n=$$(stat -c%s re/pipeline/courses/$$c.rec); \
+		SWIV_CYCLES=build/cyc_$$c.txt ./build/lotus2 --dir $(INSTALL) \
+			--frames $$n --replay re/pipeline/courses/$$c.rec \
+			--keys re/pipeline/courses/$$c.keys >/dev/null 2>&1; \
+	done
+	cat build/cyc_forest.txt $(addprefix build/cyc_,$(addsuffix .txt,$(COURSES))) \
+		| sort -u -k1,2 > $@
+
+# Every reachable course, oracle against native.
+course-gate: build/lotus2 build/lotus2_recomp
+	@for c in $(COURSES); do \
+		n=$$(stat -c%s re/pipeline/courses/$$c.rec); \
+		rm -rf build/fg_o build/fg_n; mkdir -p build/fg_o build/fg_n; \
+		./build/lotus2 --dir $(INSTALL) --frames $$n \
+			--replay re/pipeline/courses/$$c.rec \
+			--keys re/pipeline/courses/$$c.keys \
+			--ppm-seq build/fg_o/f --ppm-every 250 >/dev/null 2>&1; \
+		./build/lotus2_recomp --dir $(INSTALL) --frames $$n \
+			--replay re/pipeline/courses/$$c.rec \
+			--keys re/pipeline/courses/$$c.keys \
+			--ppm-seq build/fg_n/f --ppm-every 250 >/dev/null 2>&1; \
+		printf "%-9s " $$c; \
+		python3 tools/frame_gate.py build/fg_o build/fg_n | head -1; \
+	done
 
 $(RECOMP_SRC): tools/m68k2c.py re/pipeline/pcset_race.txt build/dasm \
 		re/pipeline/cycles.txt $(DECODE_IMAGE)
@@ -377,4 +403,4 @@ test: selftest boot-test
 clean:
 	rm -rf build
 
-.PHONY: replay-gate override-check frame-gate debug coherence play no-musashi decode-check recomp recomp-gate statelog trace pcset drive all native boot-test selftest oracle test clean gate-capture road-capture render-gate view view-race track course
+.PHONY: course-gate replay-gate override-check frame-gate debug coherence play no-musashi decode-check recomp recomp-gate statelog trace pcset drive all native boot-test selftest oracle test clean gate-capture road-capture render-gate view view-race track course
