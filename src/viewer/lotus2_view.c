@@ -265,7 +265,7 @@ static int course_data_ready(void)
         if (course_curve(i)) return 1;
     return 0;
 }
-static int course_here(void)
+__attribute__((unused)) static int course_here(void)
 { return (int)((r32(A3 + 0x30d8) >> 16) & 0xffff); }
 
 /* Course preview: a 3D drive-along built from the same curvature/slope
@@ -280,7 +280,14 @@ static float course_zoom = 1.0f;
 static int course_playing = 0;      /* auto-drive the preview */
 static int course_drive = 1;        /* poke the game to the scrub position */
 static Texture2D game_screen;       /* live game frame, drawn in the 3D pane */
-static float course_speed = 1.0f;   /* segments per frame */
+/* How fast the game itself moves along the course, MEASURED rather than
+ * guessed: two race snapshots 100 frames apart put $30d8 at 40.3034 and
+ * 41.5498 segments, so 0.01246 segments per frame at a speed word of
+ * 425.  Driving the preview at one segment per frame -- which is what it
+ * used to do -- is eighty times too fast, and that is why the hills
+ * jumped instead of rolling. */
+#define SEG_PER_FRAME 0.01246f
+static float course_speed = SEG_PER_FRAME;
 
 /* Integrate the course into a centreline + height once per frame. */
 typedef struct { Vector2 p; float h; } CourseNode;
@@ -482,15 +489,19 @@ static const uint8_t *course_snapshot_table(void)
 }
 
 /* One frame of the road chain at an arbitrary course position. */
-static void roadplay_draw(int seg)
+/* `where` is fractional on purpose.  The course position is a 16.16
+ * value and the keyframe generator interpolates within a record, so
+ * seeking on whole segments only ever showed 1024 discrete views and
+ * every step between them was a jump. */
+static void roadplay_draw(float where)
 {
     if (!rp_ready) return;
-    if (seg < 0) seg = 0;
-    if (seg > COURSE_SEGMENTS - 1) seg = COURSE_SEGMENTS - 1;
+    if (where < 0) where = 0;
+    if (where > COURSE_SEGMENTS - 1) where = COURSE_SEGMENTS - 1;
     if (rp_clean)
         memcpy(rp_g.chip + rp_clean_at, rp_clean,
                (size_t)RACE_PLANES * RACE_PLANE_STRIDE);
-    pf32(&rp_g, A3 + 0x30d8, (uint32_t)seg << 16);
+    pf32(&rp_g, A3 + 0x30d8, (uint32_t)(where * 65536.0f));
     /* No steering.  $30dc is the steering word the perspective pass
      * picks its variant from -- zero runs the plain, centred pass, while
      * anything else leans the road the way the car was being steered.
@@ -1040,7 +1051,7 @@ static void page_course(void)
     /* The game's own road chain when a snapshot for this course is
      * available; the decoded-table preview only when it is not. */
     if (!rp_ready || rp_course != course_sel) roadplay_load(course_sel);
-    if (rp_ready) roadplay_draw((int)course_scrub);
+    if (rp_ready) roadplay_draw(course_scrub);
     else render_road_frame((int)course_scrub);
     course_rendered_at = course_scrub;
 
@@ -1118,7 +1129,11 @@ static void page_course(void)
                course_playing ? "STOP" : "DRIVE", course_playing))
         course_playing = !course_playing;
     ui_text("SPEED", 140, (int)cy + 12, 20, LABEL);
-    static const float SPEEDS[] = {0.25f, 0.5f, 1.0f, 2.0f, 4.0f};
+    static const float SPEEDS[] = {SEG_PER_FRAME * 0.25f,
+                                   SEG_PER_FRAME * 0.5f,
+                                   SEG_PER_FRAME,
+                                   SEG_PER_FRAME * 2.0f,
+                                   SEG_PER_FRAME * 4.0f};
     static const char *SPEED_NAMES[] = {"x.25", "x.5", "x1", "x2", "x4"};
     for (int k = 0; k < 5; k++) {
         int on = course_speed > SPEEDS[k] * 0.99f &&
@@ -1152,7 +1167,8 @@ static void page_course(void)
     if (IsGamepadAvailable(0)) {
         float ax = GetGamepadAxisMovement(0, GAMEPAD_AXIS_LEFT_X);
         if (ax < -0.25f || ax > 0.25f) {
-            course_scrub += ax * 4.0f;
+            /* a full deflection is about eight times race speed */
+            course_scrub += ax * SEG_PER_FRAME * 8.0f;
             course_playing = 0;
         }
         if (IsGamepadButtonDown(0, GAMEPAD_BUTTON_LEFT_FACE_LEFT))
@@ -1172,8 +1188,10 @@ static void page_course(void)
     }
 
     /* keyboard navigation */
+    /* held arrows scrub; a plain press moves at about forty times race
+     * speed, shift covers ground */
     float step = (IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT))
-               ? 25.0f : 2.0f;
+               ? 10.0f : 0.5f;
     if (IsKeyDown(KEY_LEFT))  { course_scrub -= step; course_playing = 0; }
     if (IsKeyDown(KEY_RIGHT)) { course_scrub += step; course_playing = 0; }
     if (IsKeyPressed(KEY_HOME)) { course_scrub = 0; course_playing = 0; }
@@ -1206,7 +1224,7 @@ static void page_game(void)
          * to be mapped into it too or the button is only clickable where
          * it is drawn on a 1:1 window. */
         Bezel bz = bezel_begin(4.0f, 3.0f,
-                               (Rectangle){0, 0, WIN_W, WIN_H - BAR_H});
+                               (Rectangle){0, 0, WIN_W, WIN_H});
         Rectangle src = { GAME_OX, GAME_OY, GAME_W, GAME_H };
         DrawTexturePro(game_screen, src, bz.game, (Vector2){0, 0}, 0.0f,
                        WHITE);
@@ -1268,7 +1286,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--roadpc") && i + 1 < argc)
             road_capture_pc = (uint32_t)strtoul(argv[++i], NULL, 16);
         else if (!strcmp(argv[i], "--scrub") && i + 1 < argc) {
-            course_scrub = (float)strtol(argv[++i], NULL, 0);
+            course_scrub = strtof(argv[++i], NULL);
             course_follow = 0;
             course_drive = 1;
         }
@@ -1358,7 +1376,6 @@ int main(int argc, char **argv)
     road_tex = LoadTextureFromImage(rimg);
     amiga_set_pc_hook(road_pc_hook);
     bool paused = false, frozen = false, freeze_on_course = false;
-    char status[256];
 
     if (offline) { frozen = true; SetTargetFPS(50); }
     long draws = 0;
@@ -1440,31 +1457,27 @@ int main(int argc, char **argv)
         default:           page_game(); break;
         }
 
-        /* --- control bar --- */
-        int by = WIN_H - BAR_H;
-        DrawRectangle(0, by, WIN_W, BAR_H, BAR_BG);
-        float r1 = by + 26, r2 = by + 72, bh = 40;
-        int seg = course_here();
-        snprintf(status, sizeof status,
-                 "frame %ld   pc $%06x   seg %d/%d   blits %ld%s",
-                 swiv_frame_no, cpu_get_reg(CPU_REG_PC), seg,
-                 COURSE_SEGMENTS, swiv_blit_count, paused ? "   PAUSED" : "");
-        ui_text(status, 8, by + 4, 16, RAYWHITE);
-
-        if (button((Rectangle){8, r1, 120, bh}, "GAME",
-                   mode == MODE_GAME)) mode = MODE_GAME;
-        if (button((Rectangle){136, r1, 160, bh}, "COURSES",
-                   mode == MODE_COURSE)) mode = MODE_COURSE;
-        if (button((Rectangle){WIN_W - 108, r1, 100, bh},
-                   paused ? "RESUME" : "PAUSE", paused)) paused = !paused;
-        if (button((Rectangle){WIN_W - 216, r1, 100, bh}, "SHOT", 0)) {
-            Image s = LoadImageFromScreen();
-            ExportImage(s, "lotus2view.png");
-            UnloadImage(s);
+        /* --- control bar ---
+         * The play screen is the game and its surround, nothing else:
+         * no bar, no frame counter, no PC.  The bar belongs to the
+         * debug pages, and its only job there is to get you back. */
+        if (mode != MODE_GAME) {
+            int by = WIN_H - BAR_H;
+            DrawRectangle(0, by, WIN_W, BAR_H, BAR_BG);
+            float r1 = by + 26, r2 = by + 72, bh = 40;
+            if (button((Rectangle){8, r1, 220, bh}, "BACK TO GAME", 0))
+                mode = MODE_GAME;
+            if (button((Rectangle){WIN_W - 108, r1, 100, bh},
+                       paused ? "RESUME" : "PAUSE", paused)) paused = !paused;
+            if (button((Rectangle){WIN_W - 216, r1, 100, bh}, "SHOT", 0)) {
+                Image sh = LoadImageFromScreen();
+                ExportImage(sh, "lotus2view.png");
+                UnloadImage(sh);
+            }
+            ui_text("ESC back to the game   F2 screenshot   [ ] scrub   "
+                    "pad: SELECT swaps page",
+                    8, (int)r2 + 12, 18, LIGHTGRAY);
         }
-        ui_text("P pause emulation   F2 screenshot   [ ] scrub   "
-                "pad: SELECT swaps page",
-                8, (int)r2 + 12, 18, LIGHTGRAY);
         EndTextureMode();
 
         /* --- blit the canvas, scaled and centred --- */
