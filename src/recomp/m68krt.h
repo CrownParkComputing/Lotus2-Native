@@ -163,7 +163,16 @@ static inline void m68k_push16(M68K *m, uint16_t v)
 static inline uint16_t m68k_pop16(M68K *m)
 { uint16_t v = (uint16_t)m68k_rd(m, m->a[7], 2); m->a[7] += 2; return v; }
 
-/* rte: the 68000 exception frame is SR then PC, pushed in that order. */
+/* rte: the 68000 exception frame is SR then PC, pushed in that order.
+ *
+ * NOTE: Musashi re-checks interrupts here, via m68ki_set_sr ending in
+ * m68ki_check_interrupts.  Modelling that -- together with treating the
+ * IRQ as a level that stays asserted rather than an event consumed on
+ * delivery -- was tried and made agreement WORSE (storm 17/25 against
+ * 23/25).  The host raises and lowers the line at its own points, so the
+ * two effects do not compose the way they do inside Musashi.  Left as it
+ * is, deliberately, with the experiment recorded so it is not repeated.
+ */
 static inline void m68k_rte(M68K *m)
 {
     m68k_set_sr(m, m68k_pop16(m));
@@ -176,6 +185,7 @@ static inline void m68k_rte(M68K *m)
 static inline int m68k_take_irq(M68K *m, int level)
 {
     int mask = (m->sr_hi >> 8) & 7;
+    if (level == 0) return 0;
     if (level != 7 && level <= mask) return 0;
     uint16_t old = m68k_get_sr(m);
     m->sr_hi = (uint16_t)((m->sr_hi & ~0x0700u) | 0x2000u | (level << 8));

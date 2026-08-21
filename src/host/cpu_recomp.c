@@ -111,11 +111,19 @@ int cpu_execute(int cycles)
     timeslice_over = 0;
     unsigned long budget = cpu.cycles + (unsigned long)cycles;
     cpu.cycles_base = cpu.cycles;
+    /* Once per timeslice, NOT per instruction.
+     *
+     * Musashi checks interrupts only at the top of m68k_execute -- its own
+     * comment says "ASG: removed per-instruction interrupt checks", and
+     * the loop body has none.  Since the host calls this once per
+     * scanline, an interrupt therefore lands on a line boundary.  Taking
+     * them at every instruction boundary is closer to real hardware and
+     * further from the oracle: the CPU takes an interrupt one instruction
+     * before Musashi would, the stack ends up one frame deeper, and
+     * anything stepping per interrupt drifts.  That is what left STORM's
+     * rain -- and only its rain -- one step out of phase.
+     */
     while (cpu.cycles < budget && !cpu.halted && !timeslice_over) {
-        /* Interrupts are taken at ANY instruction boundary, not once per
-         * scanline.  The music replay runs from the vblank handler, so
-         * deferring an interrupt to the start of the next line shifts its
-         * state and eventually sends it down a different branch. */
         if (pending_irq && m68k_take_irq(&cpu, pending_irq))
             pending_irq = 0;
         swiv_instr_hook(cpu.pc);
