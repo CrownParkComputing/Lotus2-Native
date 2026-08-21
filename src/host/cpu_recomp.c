@@ -131,6 +131,13 @@ int cpu_execute(int cycles)
             lotus2_recomp_step(&cpu);
         steps_total++;
     }
+    /* Musashi does SET_CYCLES(num_cycles) at the top of every call, so a
+     * timeslice that overshoots its budget -- the last instruction always
+     * does -- loses the excess rather than borrowing it from the next
+     * line.  Carrying it forward makes each line start slightly short,
+     * which over 313 lines a frame is a different instruction count. */
+    cpu.cycles = budget;
+
     if (cpu.halted) {
         fprintf(stderr, "cpu_recomp: HALTED pc=$%06x: %s\n",
                 cpu.pc, cpu.fault ? cpu.fault : "?");
