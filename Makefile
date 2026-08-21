@@ -434,6 +434,15 @@ storm-snaps: build/lotus2_recomp
 	./build/lotus2_recomp --dir $(INSTALL) \
 		--replay re/pipeline/courses/storm.rec \
 		--keys re/pipeline/courses/storm.keys --frames 6310 >/dev/null 2>&1
+	@for pcs in 2148c0,2148c4:ws_ 2148ca,2148ce:we_ 2159f2,2159f6:wp_; do \
+		p=$${pcs%%:*}; x=$${pcs##*:}; \
+		SWIV_SNAP_PCS=$$p SWIV_SNAP_FROM=6300 SWIV_SNAP_MAX=2 \
+		SWIV_SNAP_PREFIX=re/pipeline/storm/$$x \
+		./build/lotus2_recomp --dir $(INSTALL) \
+			--replay re/pipeline/courses/storm.rec \
+			--keys re/pipeline/courses/storm.keys \
+			--frames 6320 >/dev/null 2>&1; \
+	done
 	@echo "storm-snaps: done"
 
 verify-storm: build/lotus2_native

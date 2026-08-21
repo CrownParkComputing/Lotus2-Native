@@ -424,6 +424,40 @@ static void stage_span_fill(Game *g)
     stage_expect(8 + 2, s.a2); stage_expect(8 + 4, s.a4);
 }
 
+/* $215906: one step of the weather state machine. */
+static void stage_weather_step(Game *g)
+{
+    Regs r;
+    for (int i = 0; i < 8; i++) { r.d[i] = stage_d[i]; r.a[i] = stage_a[i]; }
+    weather_step(g, &r);
+    stage_expect(8 + 0, r.a[0]);
+    stage_expect(8 + 1, r.a[1]);
+    stage_expect(8 + 2, r.a[2]);
+    stage_expect(8 + 4, r.a[4]);
+}
+
+/* $21495a: the weather band's geometry, registers in and out. */
+static void stage_weather_span(Game *g)
+{
+    Regs r;
+    for (int i = 0; i < 8; i++) { r.d[i] = stage_d[i]; r.a[i] = stage_a[i]; }
+    weather_span(g, &r);
+    for (int i = 0; i < 8; i++) stage_expect(i, r.d[i]);
+    stage_expect(8 + 0, r.a[0]);
+}
+
+/* $214994: the weather emitter, driven with the caller's registers. */
+static void stage_weather_emit(Game *g)
+{
+    Regs r;
+    for (int i = 0; i < 8; i++) { r.d[i] = stage_d[i]; r.a[i] = stage_a[i]; }
+    weather_emit(g, &r);
+    for (int i = 0; i < 8; i++) stage_expect(i, r.d[i]);
+    stage_expect(8 + 0, r.a[0]);
+    stage_expect(8 + 1, r.a[1]);
+    stage_expect(8 + 4, r.a[4]);
+}
+
 static void stage_scen_sort(Game *g)
 {
     uint32_t r[8];
@@ -545,6 +579,30 @@ int main(int argc, char **argv)
                                "re/pipeline/storm/st_5_212f26_fast.bin",
                                "re/pipeline/storm/st_6_212f2a_fast.bin",
                                road_blitqueue);
+            /* the weather emitter writes into the blit queue at
+             * $200206 upward, which is all it owns */
+            /* one step of the state machine: the blit queue it fills
+             * and the phase word it advances */
+            stage_range(0x200000, 0x201000);
+            rc |= verify_stage("storm weather_step",
+                               "re/pipeline/storm/wp_0_2159f2_fast.bin",
+                               "re/pipeline/storm/wp_1_2159f6_fast.bin",
+                               stage_weather_step);
+            stage_range(0x20a000, 0x20a002);   /* phase word only */
+            rc |= verify_stage("storm weather phase",
+                               "re/pipeline/storm/wp_0_2159f2_fast.bin",
+                               "re/pipeline/storm/wp_1_2159f6_fast.bin",
+                               stage_weather_step);
+            stage_range(0x207fff, 0x208001);   /* writes nothing */
+            rc |= verify_stage("storm weather_span",
+                               "re/pipeline/storm/ws_0_2148c0_fast.bin",
+                               "re/pipeline/storm/ws_1_2148c4_fast.bin",
+                               stage_weather_span);
+            stage_range(0x200000, 0x201000);
+            rc |= verify_stage("storm weather_emit",
+                               "re/pipeline/storm/we_0_2148ca_fast.bin",
+                               "re/pipeline/storm/we_1_2148ce_fast.bin",
+                               stage_weather_emit);
             return rc;
         }
         else if (!strcmp(argv[i], "--verify-road")) {

@@ -148,6 +148,13 @@ static inline uint32_t m32(const Game *g, uint32_t addr)
                                   : g32(g->fast, addr - GUEST_FAST_ADDR);
 }
 
+/* ---- weather (the courses other than FOREST) ---- */
+void     weather_span(Game *g, Regs *r);   /* $21495a */
+uint32_t weather_emit(Game *g, Regs *r);   /* $214994; returns A4 */
+void     weather_band(Game *g, Regs *r, int which);  /* $2148b2/$2148da/$214914 */
+void     weather_step(Game *g, Regs *r);   /* $215906 */
+void     weather_pass(Game *g, Regs *r);   /* $2159ec */
+
 /* ---- car model ---- */
 void car_update(Game *g, uint32_t view);       /* $2129f2 */
 void car_checkpoint(Game *g, uint32_t view);   /* $212680 */

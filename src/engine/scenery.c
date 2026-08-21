@@ -711,3 +711,223 @@ void scen_emit(Game *g, Span *s)
         return;
     }
 }
+
+/* ---- weather ---------------------------------------------------------
+ * The rain and snow the courses other than FOREST draw.  `make pcset` on
+ * a FOREST race never reaches any of this; a STORM race runs it every
+ * frame, through $215906 -> $2148b0/$2148b2/$2148da/$214914 -> here.
+ *
+ * Both routines are register machines and whole 32-bit registers are
+ * carried, because `move.w` leaves the upper half alone and the snapshot
+ * gate compares all 32 bits.
+ */
+
+/* $21495a-$214992 [snapshot-verified]
+ *
+ * Works out where a band of weather sits and how wide it is.  D7 indexes
+ * the keyframe table at A3-$2278 for the band's screen line; D0 is
+ * scaled by $2d0e(A3) -- the scroll phase -- and reduced modulo D3, then
+ * rounded up to a whole number of D6-wide steps.  Returns D0 (twice the
+ * step count), D1 (the remainder of that step) and D7 (the line).
+ */
+void weather_span(Game *g, Regs *r)
+{
+    uint16_t d7 = (uint16_t)(w(r->d[7]) << 3);          /* asl.w #3 */
+    r->d[7] = setw(r->d[7], d7);
+    uint32_t a0 = A3 - 0x2278;
+    r->a[0] = a0;
+    d7 = f16(g, a0 + (uint32_t)(int32_t)(int16_t)d7 + 4);
+    r->d[7] = setw(r->d[7], d7);
+
+    /* mulu.w writes the WHOLE 32-bit product, not just the low word */
+    uint32_t d0 = (uint32_t)w(r->d[0]) * f16(g, A3 + 0x2d0e);
+    d0 >>= 8;                                            /* lsr.l #8 */
+    uint16_t d3 = w(r->d[3]), d6 = w(r->d[6]);
+    if (d3) {
+        uint32_t q = d0 / d3, rem = d0 % d3;
+        if (q <= 0xffff) d0 = (rem << 16) | (q & 0xffff); /* divu.w */
+    }
+    d0 = (d0 >> 16) | (d0 << 16);                        /* swap */
+
+    uint16_t d1 = (uint16_t)(d3 - (uint16_t)d0);         /* sub.w D0,D1 */
+    d0 = (d0 & 0xffff0000u) | d1;                        /* move.w D1,D0 */
+
+    d0 = (uint32_t)(uint16_t)d0 * 0x2a;                  /* mulu.w #$2a */
+    if (d6) {
+        uint32_t q = d0 / d6, rem = d0 % d6;
+        if (q <= 0xffff) d0 = (rem << 16) | (q & 0xffff);
+    }
+    d0 = (d0 >> 16) | (d0 << 16);                        /* swap: low=rem */
+    d1 = (uint16_t)d0;                                   /* move.w D0,D1 */
+    d0 = (d0 >> 16) | (d0 << 16);                        /* swap: low=quot */
+    if (d1 != 0) d0 = (d0 & 0xffff0000u) | (uint16_t)(d0 + 1);
+
+    uint32_t d1l = (r->d[1] & 0xffff0000u) | (uint16_t)d0;
+    d1l = (uint32_t)(uint16_t)d1l * d6;                  /* mulu.w D6,D1 */
+    {
+        uint32_t q = d1l / 0x2a, rem = d1l % 0x2a;
+        if (q <= 0xffff) d1l = (rem << 16) | (q & 0xffff);
+    }
+    d1l = (d1l >> 16) | (d1l << 16);                     /* swap */
+    d0 = (d0 & 0xffff0000u) | (uint16_t)(w(d0) + w(d0)); /* add.w D0,D0 */
+
+    r->d[0] = d0;
+    r->d[1] = d1l;
+}
+
+/* $214994-$2149fc [snapshot-verified]
+ *
+ * Emits the weather into the blit queue -- four records, one per
+ * bitplane, $20d0 apart, which is the same queue road_blitqueue()
+ * consumes.  The shape pointer comes from the table at $2438(A3), whose
+ * entries are CHIP addresses, so it is read range-aware.
+ *
+ * Returns the queue write pointer (A4) where it left it; nothing is
+ * written at all when the band is off the top of the screen or narrower
+ * than one step.
+ */
+uint32_t weather_emit(Game *g, Regs *r)
+{
+    uint32_t a1 = m32(g, A3 + 0x2438
+                      + (uint32_t)(int32_t)(int16_t)w(r->d[5]));
+    a1 += (uint32_t)(int32_t)(int16_t)w(r->d[0]);        /* adda.w */
+    r->a[1] = a1;
+
+    uint16_t d3 = w(r->d[7]);
+    r->a[0] = A3 - 0x3d6a;
+    d3 = (uint16_t)(d3 + d3);                            /* add.w D3,D3 */
+    d3 = f16(g, (A3 - 0x3d6a) + (uint32_t)(int32_t)(int16_t)d3);
+    r->d[3] = (uint32_t)(int32_t)(int16_t)d3;            /* ext.l */
+    d3 = (uint16_t)(d3 - w(r->d[4]));                    /* sub.w D4,D3 */
+    r->d[3] = (r->d[3] & 0xffff0000u) | d3;
+    if ((int16_t)d3 < 0) return r->a[4];                 /* bmi */
+
+    r->d[3] = (uint32_t)(int32_t)(int16_t)d3;            /* ext.l */
+    uint16_t d6 = w(r->d[6]);
+    if (d6) {
+        uint32_t q = r->d[3] / d6, rem = r->d[3] % d6;
+        if (q <= 0xffff) r->d[3] = (rem << 16) | (q & 0xffff);
+    }
+    if (w(r->d[3]) == 0) return r->a[4];                 /* beq on quotient */
+    d3 = (uint16_t)(w(r->d[3]) << 6);                    /* asl.w #6 */
+    d3 = (uint16_t)(d3 + 1);
+    r->d[3] = (r->d[3] & 0xffff0000u) | d3;
+
+    uint32_t a0 = f32(g, A3 + 0x2f8a);
+    a0 += (uint32_t)(int32_t)(int16_t)w(r->d[1]);
+    a0 += (uint32_t)(int32_t)(int16_t)w(r->d[4]);
+    a0 += f32(g, A3 + 0x2ec2);                           /* adda.l */
+
+    uint32_t a4 = r->a[4];
+    pf16(g, a4, w(r->d[2])); a4 += 2;
+    uint16_t d2 = (uint16_t)(d6 - 2);                    /* move.w D6,D2; subq */
+    r->d[2] = (r->d[2] & 0xffff0000u) | d2;
+    pf16(g, a4, d2); a4 += 2;
+    pf16(g, a4, d2); a4 += 2;
+    r->d[2] = 0x20d0;                                    /* move.l #$20d0,D2 */
+
+    /* Four records with the $20d0 step BETWEEN them -- three advances,
+     * not four.  Stepping after the last one leaves A0 one plane too far
+     * and the gate says so in a single register. */
+    for (int plane = 0; plane < 4; plane++) {
+        if (plane) a0 += 0x20d0;                         /* adda.w D2,A0 */
+        pf32(g, a4, a0); a4 += 4;
+        pf32(g, a4, a0); a4 += 4;
+        pf32(g, a4, a1); a4 += 4;
+        pf16(g, a4, d3); a4 += 2;
+    }
+    r->a[0] = a0;
+    r->a[4] = a4;
+    return a4;
+}
+
+/* $2148b2 / $2148da / $214914 [snapshot-verified]
+ *
+ * One band of weather: set up its geometry, then emit it at a list of
+ * screen offsets.  The three differ only in those constants, so they are
+ * one function and a table -- which is what they are, three copies of
+ * the same eight instructions with different immediates.
+ *
+ * `clr.w D4` and `move.w #x,D4` write the low word only; `moveq` writes
+ * all 32 bits.  The gate compares all 32, so the difference is kept.
+ */
+void weather_band(Game *g, Regs *r, int which)
+{
+    struct Band {
+        uint16_t d0, d3, d7, d6;
+        int n;
+        struct { uint16_t d4; int moveq_d4; uint32_t d2; } step[6];
+    };
+    static const struct Band BANDS[3] = {
+        /* $2148b2 */
+        { 0x200, 0x00d0, 0x40, 0x001a, 2,
+          { {0x00, 0, 0x0c}, {0x2a, 1, 0x0b} } },
+        /* $2148da */
+        { 0x400, 0x00cc, 0x20, 0x0044, 4,
+          { {0x00, 0, 0x0c}, {0x2a, 1, 0x0c},
+            {0x54, 1, 0x0c}, {0x7e, 1, 0x0b} } },
+        /* $214914 */
+        { 0x600, 0x00dc, 0x00, 0x006e, 6,
+          { {0x00, 0, 0x0c}, {0x2a, 1, 0x0c}, {0x54, 1, 0x0c},
+            {0x7e, 1, 0x0c}, {0xa8, 0, 0x0b}, {0xd2, 0, 0x0b} } },
+    };
+    if (which < 0 || which > 2) return;
+    const struct Band *b = &BANDS[which];
+
+    r->d[0] = setw(r->d[0], b->d0);          /* move.w */
+    r->d[3] = setw(r->d[3], b->d3);
+    if (which == 2) r->d[7] = setw(r->d[7], 0);   /* clr.w D7 */
+    else            r->d[7] = b->d7;              /* moveq */
+    r->d[6] = setw(r->d[6], b->d6);
+    weather_span(g, r);
+
+    for (int i = 0; i < b->n; i++) {
+        if (b->step[i].moveq_d4) r->d[4] = b->step[i].d4;   /* moveq */
+        else r->d[4] = setw(r->d[4], b->step[i].d4);        /* clr.w/move.w */
+        r->d[5] = 0;                                        /* moveq #0,D5 */
+        r->d[2] = b->step[i].d2;                            /* moveq */
+        weather_emit(g, r);
+    }
+}
+
+/* $215906-$2159ea [snapshot-verified]
+ *
+ * One step of the weather state machine.  $2ebc(A3) walks $60 -> $40 ->
+ * $20 -> $0 -> $ffe0, drawing a different band at each stop, and
+ * $2e02(A3) picks which family of bands: the $2147xx set or the $2148xx
+ * set.  A0-A2 are saved around every call, so the caller's pointers
+ * survive.
+ *
+ * Only the $2148xx family is ported: it is the one a STORM race runs,
+ * and `make pcset` says the $2147xx family does not execute on either
+ * course captured so far.  When a course is found that uses it, the
+ * table above is where it goes.
+ */
+void weather_step(Game *g, Regs *r)
+{
+    uint16_t phase = f16(g, A3 + 0x2ebc);
+    int family_b = f16(g, A3 + 0x2e02) != 0;
+    int band = phase == 0x60 ? 0 : phase == 0x40 ? 1
+             : phase == 0x20 ? 2 : phase == 0x00 ? 3 : -1;
+    if (band < 0) return;
+
+    uint32_t a0 = r->a[0], a1 = r->a[1], a2 = r->a[2];
+    if (family_b) {
+        /* $2148b0 for phase $60 is a bare rts: the first stop draws
+         * nothing on this family. */
+        if (band >= 1) weather_band(g, r, band - 1);
+    }
+    r->a[0] = a0; r->a[1] = a1; r->a[2] = a2;   /* movem.l (A7)+,A0-A2 */
+
+    static const uint16_t NEXT[4] = {0x40, 0x20, 0x00, 0xffe0};
+    pf16(g, A3 + 0x2ebc, NEXT[band]);
+}
+
+/* $2159ec: run the state machine until $2ebc goes negative. */
+void weather_pass(Game *g, Regs *r)
+{
+    for (int guard = 0; guard < 8; guard++) {
+        if ((int16_t)f16(g, A3 + 0x2ebc) < 0) return;
+        weather_step(g, r);
+    }
+}
