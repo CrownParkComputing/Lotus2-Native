@@ -2025,6 +2025,8 @@ void amiga_report(void)
     }
 }
 
+uint32_t amiga_get_coplc(void) { return cop1lc; }
+
 void amiga_get_voice(int channel, AmigaVoice *out)
 {
     if (!out) return;

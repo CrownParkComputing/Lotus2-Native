@@ -1305,10 +1305,64 @@ static void gfx_decode(void)
         for (int x = w; x < GFX_MAX_W; x++) gfx_img[y * GFX_MAX_W + x] = 0xff000000u;
 }
 
+/* Read the geometry out of the copper list that is actually on screen.
+ *
+ * The page used to open with the RACING geometry -- four planes, a row
+ * stride of 42, planes $20d0 apart -- and a loading screen is not that
+ * shape, so it came out as hash.  A picture's geometry is not something
+ * to guess at when the machine is holding the answer: the copper list
+ * the chipset is running carries the bitplane pointers, the modulo and
+ * the plane count.  COP1LC says which list that is, so there is no
+ * matching or guessing involved.
+ *
+ * Returns 1 when it found a usable list.
+ */
+static uint32_t gfx_coplc;
+static int gfx_read_display(void)
+{
+    uint32_t at = amiga_get_coplc() & (CHIP_SIZE - 1);
+    if (at < 0x400) return 0;
+    gfx_coplc = at;
+    uint32_t ptr[6] = {0};
+    int planes = 0, mod1 = 0, have = 0;
+    for (int i = 0; i < 4096; i++, at += 4) {
+        if (at + 3 >= CHIP_SIZE) break;
+        uint16_t reg = (uint16_t)((chip[at] << 8) | chip[at + 1]);
+        uint16_t dat = (uint16_t)((chip[at + 2] << 8) | chip[at + 3]);
+        if (reg >= 0x00e0 && reg <= 0x00f3) {
+            int p = (reg - 0x00e0) / 4;
+            if (reg & 2) ptr[p] = (ptr[p] & 0xffff0000u) | dat;
+            else         ptr[p] = (ptr[p] & 0xffffu) | ((uint32_t)dat << 16);
+            if (p + 1 > have) have = p + 1;
+        } else if (reg == 0x0100) {
+            planes = (dat >> 12) & 7;
+        } else if (reg == 0x0108) {
+            mod1 = (int16_t)dat;
+        } else if (reg == 0xffff && dat == 0xfffe) {
+            break;
+        }
+    }
+    if (!have || (ptr[0] & ~1u) < 0x400) return 0;
+    gfx_addr = ptr[0] & ~1u;
+    gfx_planes = planes >= 1 && planes <= 6 ? planes
+               : (have >= 1 && have <= 6 ? have : 4);
+    gfx_stride = 40 + (mod1 > 0 ? mod1 : 0);
+    gfx_words = 20;
+    if (have > 1 && ptr[1] > ptr[0] && ptr[1] - ptr[0] < CHIP_SIZE)
+        gfx_plane_gap = (int)(ptr[1] - ptr[0]);
+    else
+        gfx_plane_gap = gfx_stride * gfx_rows;
+    return 1;
+}
+
 static void page_gfx(void)
 {
     page_head("GRAPHICS");
     char buf[128];
+
+    /* Follow the display until someone touches a control, so the page
+     * opens showing the screen that is up rather than a guess. */
+    if (gfx_from_copper) gfx_read_display();
 
     /* the game's own idea of where its screens are */
     static const struct { const char *name; uint32_t at; } SLOTS[] = {
@@ -1321,7 +1375,7 @@ static void page_gfx(void)
         uint32_t v = r32(SLOTS[i].at) & ~1u;
         int on = (v == gfx_addr) || ((v + 2) == gfx_addr);
         snprintf(buf, sizeof buf, "%s", SLOTS[i].name);
-        if (button(b, buf, on)) gfx_take_buffer(SLOTS[i].at);
+        if (button(b, buf, on)) { gfx_take_buffer(SLOTS[i].at); gfx_from_copper = 0; }
     }
 
     /* geometry, because a picture's shape is not a thing to guess */
@@ -1330,44 +1384,79 @@ static void page_gfx(void)
     ui_text("ADDR", bx, by + 6, 20, LABEL);
     ui_text(buf, bx + 60, by + 6, 20, RAYWHITE);
     if (button((Rectangle){bx + 150, by, 44, bh}, "-1k", 0))
-        gfx_addr = gfx_addr > 0x400 ? gfx_addr - 0x400 : 0;
+        { gfx_addr = gfx_addr > 0x400 ? gfx_addr - 0x400 : 0; gfx_from_copper = 0; }
     if (button((Rectangle){bx + 198, by, 44, bh}, "+1k", 0))
-        gfx_addr += 0x400;
+        { gfx_addr += 0x400; gfx_from_copper = 0; }
     if (button((Rectangle){bx + 246, by, 50, bh}, "-row", 0))
-        gfx_addr = gfx_addr > (uint32_t)gfx_stride ? gfx_addr - gfx_stride : 0;
+        { gfx_addr = gfx_addr > (uint32_t)gfx_stride ? gfx_addr - gfx_stride : 0;
+          gfx_from_copper = 0; }
     if (button((Rectangle){bx + 300, by, 50, bh}, "+row", 0))
-        gfx_addr += gfx_stride;
+        { gfx_addr += gfx_stride; gfx_from_copper = 0; }
 
     ui_text("PLANES", bx + 380, by + 6, 20, LABEL);
     for (int p = 1; p <= 6; p++) {
         snprintf(buf, sizeof buf, "%d", p);
         if (button((Rectangle){bx + 460 + (p - 1) * 40, by, 36, bh}, buf,
-                   p == gfx_planes)) gfx_planes = p;
+                   p == gfx_planes)) { gfx_planes = p; gfx_from_copper = 0; }
     }
     ui_text("STRIDE", bx + 720, by + 6, 20, LABEL);
     static const int STRIDES[] = {40, 42, 44, 48, 80};
     for (int i = 0; i < 5; i++) {
         snprintf(buf, sizeof buf, "%d", STRIDES[i]);
         if (button((Rectangle){bx + 800 + i * 52, by, 48, bh}, buf,
-                   gfx_stride == STRIDES[i])) gfx_stride = STRIDES[i];
+                   gfx_stride == STRIDES[i]))
+            { gfx_stride = STRIDES[i]; gfx_from_copper = 0; }
     }
     ui_text("WIDTH", bx + 1080, by + 6, 20, LABEL);
     static const int WORDS[] = {16, 20, 22, 24, 32};
     for (int i = 0; i < 5; i++) {
         snprintf(buf, sizeof buf, "%d", WORDS[i] * 16);
         if (button((Rectangle){bx + 1160 + i * 62, by, 58, bh}, buf,
-                   gfx_words == WORDS[i])) gfx_words = WORDS[i];
+                   gfx_words == WORDS[i]))
+            { gfx_words = WORDS[i]; gfx_from_copper = 0; }
     }
     snprintf(buf, sizeof buf, "plane gap $%04x", gfx_plane_gap);
     ui_text(buf, bx + 1490, by + 6, 20, LABEL);
     if (button((Rectangle){bx + 1660, by, 60, bh}, "$20d0", gfx_plane_gap == 0x20d0))
-        gfx_plane_gap = 0x20d0;
-    if (button((Rectangle){bx + 1726, by, 60, bh}, "1 pic", gfx_plane_gap == gfx_stride * gfx_rows))
-        gfx_plane_gap = gfx_stride * gfx_rows;
+        { gfx_plane_gap = 0x20d0; gfx_from_copper = 0; }
+    if (button((Rectangle){bx + 1726, by, 60, bh}, "1 pic",
+               gfx_plane_gap == gfx_stride * gfx_rows))
+        { gfx_plane_gap = gfx_stride * gfx_rows; gfx_from_copper = 0; }
+    if (button((Rectangle){bx + 1792, by, 110, bh}, "FOLLOW SCREEN",
+               gfx_from_copper)) gfx_from_copper = 1;
+
+    /* The screen as the machine shows it: the compositor is a per-line
+     * copper interpreter that make render-gate proves pixel-identical to
+     * the oracle, so this is the picture, not an interpretation of it. */
+    static uint32_t shot[VIEW_W * VIEW_H];
+    static Texture2D shot_tex;
+    static int shot_ready;
+    if (!shot_ready) {
+        Image si = { .data = shot, .width = VIEW_W, .height = VIEW_H,
+                     .mipmaps = 1,
+                     .format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8 };
+        shot_tex = LoadTextureFromImage(si);
+        shot_ready = 1;
+    }
+    int have_shot = gfx_coplc && composite(chip, gfx_coplc, shot) == 0;
+    if (have_shot) UpdateTexture(shot_tex, shot);
+
+    Rectangle live = {WIN_W - 16 - 640, 156, 640, 400};
+    if (have_shot) {
+        DrawRectangleRec(live, PANEL_BG);
+        DrawTexturePro(shot_tex, (Rectangle){0, 0, VIEW_W, VIEW_H},
+                       (Rectangle){live.x + 8, live.y + 32, live.width - 16,
+                                   (live.width - 16) * 200.0f / 320.0f},
+                       (Vector2){0, 0}, 0.0f, WHITE);
+        DrawRectangleLinesEx(live, 1, GRID);
+        snprintf(buf, sizeof buf, "ON SCREEN   copper list $%06x", gfx_coplc);
+        ui_text(buf, (int)live.x + 8, (int)live.y + 6, 20, LABEL);
+    }
 
     gfx_decode();
     UpdateTexture(gfx_tex, gfx_img);
-    Rectangle area = {16, 156, WIN_W - 32, WIN_H - BAR_H - 176};
+    Rectangle area = {16, 156, WIN_W - 32 - (have_shot ? 656 : 0),
+                      WIN_H - BAR_H - 176};
     DrawRectangleRec(area, PANEL_BG);
     float sc = area.width / (float)(gfx_words * 16);
     float sy = area.height / (float)gfx_rows;
@@ -1379,7 +1468,7 @@ static void page_gfx(void)
                    (Rectangle){0, 0, (float)(gfx_words * 16), (float)gfx_rows},
                    dst, (Vector2){0, 0}, 0.0f, WHITE);
     DrawRectangleLinesEx(area, 1, GRID);
-    (void)gfx_from_copper;
+    ui_text("BITPLANES", (int)area.x + 8, (int)area.y + 6, 20, LABEL);
 }
 
 /* ---- SOUND: the four Paula voices ------------------------------------

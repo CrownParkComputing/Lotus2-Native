@@ -66,6 +66,11 @@ typedef struct {
     int on;
 } AmigaVoice;
 void amiga_get_voice(int channel, AmigaVoice *out);
+
+/* The copper list the chipset is running (COP1LC).  The RE viewer needs
+ * it to know which of the game's four lists is on screen -- and with it,
+ * what shape the picture being displayed actually is. */
+uint32_t amiga_get_coplc(void);
 uint32_t amiga_bplpt0(void);
 void amiga_display_state(uint16_t *bplcon0, uint16_t *dmacon,
                          uint16_t *diwstrt, uint16_t *diwstop);
