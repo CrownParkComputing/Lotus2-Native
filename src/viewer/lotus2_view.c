@@ -1008,6 +1008,32 @@ static void render_road_frame(int segment)
  * black, because the HUD band has the sky behind it and a black rectangle
  * would sit there like a hole.
  */
+/* Is the RACE on screen right now?
+ *
+ * course_data_ready() was the wrong question: it asks whether the course
+ * table has been loaded, which stays true through the menus afterwards,
+ * so the dial sat there over the options screen.
+ *
+ * The right question is what the chipset is displaying.  The race runs
+ * four bitplanes out of one of three copper lists; the title screen runs
+ * five and the course intro six, out of a fourth.  So walk the list
+ * COP1LC points at and count.
+ */
+static int race_on_screen(void)
+{
+    uint32_t at = amiga_get_coplc() & (CHIP_SIZE - 1);
+    if (at < 0x400) return 0;
+    if (at != 0x7f5f0 && at != 0x7ed0c && at != 0x7e428) return 0;
+    for (int i = 0; i < 4096; i++, at += 4) {
+        if (at + 3 >= CHIP_SIZE) break;
+        uint16_t reg = (uint16_t)((chip[at] << 8) | chip[at + 1]);
+        uint16_t dat = (uint16_t)((chip[at + 2] << 8) | chip[at + 3]);
+        if (reg == 0x0100) return ((dat >> 12) & 7) == 4;
+        if (reg == 0xffff && dat == 0xfffe) break;
+    }
+    return 0;
+}
+
 /* The HUD, measured off a race frame at 320x200:
  *
  *   "000 MPH"   x 2..64   y 2..10
@@ -2487,12 +2513,7 @@ static void draw_game_picture(Rectangle dst)
 {
     /* below the HUD band, so the speed bar keeps its own red */
     car_recolour(framebuf, SCREEN_W, SCREEN_H, GAME_OY + 34);
-    {   /* only while a race is up: there is no speed on a menu */
-        course_read_live = 1;
-        int racing = course_data_ready();
-        course_read_live = 0;
-        if (racing) hud_speedo(framebuf);
-    }
+    if (race_on_screen()) hud_speedo(framebuf);
 
     Rectangle photo;
     if (road_extras && intro_photo(&photo)) {
@@ -2634,7 +2655,7 @@ static void page_game(void)
         int mapping = 0;
         Rectangle mr = {0};
         course_read_live = 1;
-        int racing_now = !offline_mode && course_data_ready();
+        int racing_now = !offline_mode && race_on_screen();
         if (racing_now) {
             float mw = bz.right.width - 16;
             mr = (Rectangle){bz.right.x + 8, bz.right.y + 8, mw, mw};
@@ -2935,9 +2956,7 @@ int main(int argc, char **argv)
                  * prefers the PREVIEW's snapshot when one is loaded --
                  * so without this it always said "a race is up" and the
                  * menu never appeared. */
-                course_read_live = 1;
-                int racing = course_data_ready();
-                course_read_live = 0;
+                int racing = race_on_screen();
                 /* The FIRST fire is the one that leaves the title, and
                  * the menu belongs on the setup screen rather than in
                  * front of it -- so that one goes through and the next
