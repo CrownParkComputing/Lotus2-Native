@@ -315,11 +315,11 @@ int main(int argc, char **argv)
     swiv_recomp_trace_flush();
     if (ptrlog) fclose(ptrlog);
     {
-        extern long swiv_keys_delivered, swiv_keys_blocked;
+        extern long swiv_keys_delivered, swiv_keys_blocked, swiv_keys_resent;
         if (swiv_keys_delivered || swiv_keys_blocked)
-            fprintf(stderr, "keyboard: %ld delivered, %ld frames blocked "
-                    "waiting for the game's handshake\n",
-                    swiv_keys_delivered, swiv_keys_blocked);
+            fprintf(stderr, "keyboard: %ld delivered, %ld resent, %ld frames "
+                    "blocked awaiting handshake\n", swiv_keys_delivered,
+                    swiv_keys_resent, swiv_keys_blocked);
     }
     amiga_report();
     whdload_report();

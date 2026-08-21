@@ -70,6 +70,7 @@ static int color_change_count;
 static uint8_t playfield_index[SCREEN_W];
 
 static uint8_t kbd_queue[32];
+static void kbd_trace(const char *what, unsigned v);
 static int kbd_head, kbd_tail;
 static uint8_t kbd_sdr;
 static bool kbd_pending;
@@ -1123,6 +1124,7 @@ static uint8_t cia_read(uint32_t address)
             if (value & ciaa_icr_mask) value |= 0x80;
             ciaa_icr_flags = 0;
             trace_input("CIAA_ICR", value);
+            kbd_trace("read ICR", value);
             return value;
         }
         return 0xff;
@@ -1158,9 +1160,9 @@ static void cia_write(uint32_t address, uint8_t value)
             kbd_sdr = value;
             kbd_pending = false;
             return;
-        } else if (reg == 14 && (value & 0x40)) {
-            /* Handshake: the keyboard byte has been taken. */
-            kbd_pending = false;
+        } else if (reg == 14) {
+            if (value & 0x40) kbd_pending = false;
+            kbd_trace("write CRA", value);
         }
     }
     switch (reg) {
@@ -1196,7 +1198,21 @@ void amiga_key_event(uint8_t rawcode, bool up)
     kbd_tail = next;
 }
 
-long swiv_keys_delivered, swiv_keys_blocked;
+long swiv_keys_delivered, swiv_keys_blocked, swiv_keys_resent;
+static int kbd_pending_age;
+static uint8_t kbd_last_code;
+static int kbdtrace = -1;
+static void kbd_trace(const char *what, unsigned v)
+{
+    if (kbdtrace < 0) kbdtrace = getenv("SWIV_TRACE_KBD") ? 1 : 0;
+    if (!kbdtrace) return;
+    static int n;
+    if (n++ < 40)
+        fprintf(stderr, "kbd[%2d] frame %5ld %-18s %02x  pending=%d "
+                "icr=%02x mask=%02x intreq=%04x intena=%04x\n",
+                n, swiv_frame_no, what, v, kbd_pending, ciaa_icr_flags,
+                ciaa_icr_mask, intreq, intena);
+}
 
 /* True when the keyboard is ready for another code: nothing queued and
  * the game has acknowledged the last one.  An injector that ignores this
@@ -1205,6 +1221,24 @@ bool amiga_kbd_idle(void)
 {
     return !kbd_pending && kbd_head == kbd_tail;
 }
+/* The keyboard resends an unacknowledged code.
+ *
+ * This game's PORTS handler tests Timer A first and returns if it is set:
+ *
+ *     btst #$0,D0 ; bne $20f63e     <- never reaches the bit 3 test
+ *
+ * so a rawkey byte whose SP flag shares an ICR read with a timer
+ * interrupt is dropped, and the ICR read has already cleared the flag.
+ * A real Amiga keyboard copes because it waits for the handshake and
+ * RETRANSMITS after about 143 ms if it does not come; the typist never
+ * notices.  Modelling that is what makes typing reliable here, and it is
+ * hardware behaviour rather than a workaround: gating delivery on a
+ * quiet interrupt window also worked, but only under Musashi's timing --
+ * the recompiled CPU collided anyway and the password stalled at one
+ * letter again.  A fix that depends on which CPU is running is not a fix
+ * when one of them is the oracle for the other.
+ */
+#define KBD_RESEND_FRAMES 7        /* ~143 ms at 50 Hz */
 static void kbd_pump(void)
 {
     if (kbd_head == kbd_tail) return;
@@ -1215,9 +1249,25 @@ static void kbd_pump(void)
     uint8_t inverted = (uint8_t)~code;
     kbd_sdr = (uint8_t)((inverted << 1) | (inverted >> 7));
     kbd_pending = true;
+    kbd_pending_age = 0;
+    kbd_last_code = code;
     ciaa_icr_flags |= 0x08;             /* SP: a rawkey byte has arrived */
     intreq |= 0x0008;
     irq_update();
+    kbd_trace("deliver", code);
+}
+
+/* Called once per frame: re-assert an unacknowledged byte. */
+static void kbd_age(void)
+{
+    if (!kbd_pending) return;
+    if (++kbd_pending_age < KBD_RESEND_FRAMES) return;
+    kbd_pending_age = 0;
+    ciaa_icr_flags |= 0x08;
+    intreq |= 0x0008;
+    irq_update();
+    swiv_keys_resent++;
+    kbd_trace("resend", kbd_last_code);
 }
 
 #define PAULA_CLOCK 3546895.0
@@ -1911,7 +1961,9 @@ void amiga_run_frame(void)
                 render_sprites_line(cur_line);
             paint_written_sprites(cur_line);
         }
+        kbd_pump();
     }
+    kbd_age();
     kbd_pump();
     display_top_valid = false;
     intreq |= 0x0020;

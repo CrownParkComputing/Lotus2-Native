@@ -292,9 +292,17 @@ build/dasm: tools/dasm.c $(MUSASHI_DIR)/m68kdasm.c
 	$(CC) -O2 -std=c11 -I$(MUSASHI_DIR) -o $@ tools/dasm.c \
 		$(MUSASHI_DIR)/m68kdasm.c
 
-re/pipeline/cycles.txt: build/lotus2
-	SWIV_CYCLES=$@ ./build/lotus2 --dir $(INSTALL) --frames 9000 \
-		--fire-from 2100 --fire-period 100 >/dev/null 2>&1
+# Measured on BOTH courses we can reach.  A table measured only on FOREST
+# leaves every night-course instruction with a guessed cost, and the small
+# errors accumulate into a one-frame lag that shows up as the game taking
+# a different path -- which is exactly how the night course first failed.
+re/pipeline/cycles.txt: build/lotus2 re/pipeline/night.rec
+	SWIV_CYCLES=build/cyc_forest.txt ./build/lotus2 --dir $(INSTALL) \
+		--frames 9000 --fire-from 2100 --fire-period 100 >/dev/null 2>&1
+	SWIV_CYCLES=build/cyc_night.txt ./build/lotus2 --dir $(INSTALL) \
+		--frames 6500 --replay re/pipeline/night.rec \
+		--keys re/pipeline/night.keys >/dev/null 2>&1
+	cat build/cyc_forest.txt build/cyc_night.txt | sort -u -k1,2 > $@
 
 $(RECOMP_SRC): tools/m68k2c.py re/pipeline/pcset_race.txt build/dasm \
 		re/pipeline/cycles.txt $(DECODE_IMAGE)
