@@ -1135,6 +1135,60 @@ static void hud_speedo(uint32_t *img)
                 hud_pixel(img, (int)cx + dx, (int)cy + dy, white);
 }
 
+
+/* A gear lever beside the dial.  The gear is a word in the car block at
+ * $3054(A3)+$28 -- the same one the drive harness prints -- and Lotus 2
+ * is a four-speed with a low and a high range, so the gate is drawn as
+ * two columns and the knob sits where the lever would be.
+ *
+ * A lever rather than a digit because you read it without looking, which
+ * is the whole point of a gear indicator at 140 mph.
+ */
+#define GEAR_X 74
+#define GEAR_Y 10
+#define GEAR_W 22
+#define GEAR_H 32
+
+static void hud_gear(uint32_t *img)
+{
+    if (!road_extras) return;
+    int gear = (int16_t)r16(A3 + 0x3054 + 0x28);
+    if (gear < 0) gear = 0;
+    if (gear > 5) gear = 5;
+
+    const uint32_t white = 0xffccccccu, grey = 0xff666666u,
+                   red = 0xff0000aau;
+    uint32_t bg = hud_get(img, GEAR_X + GEAR_W + 10, GEAR_Y + 4);
+    for (int y = GEAR_Y - 4; y < GEAR_Y + GEAR_H + 2; y++)
+        for (int x = GEAR_X - 2; x < GEAR_X + GEAR_W + 2; x++)
+            hud_pixel(img, x, y, bg);
+
+    /* the gate: two columns joined across the middle */
+    int lx = GEAR_X + 4, rx = GEAR_X + GEAR_W - 4;
+    int ty = GEAR_Y, by = GEAR_Y + GEAR_H - 2, my = (ty + by) / 2;
+    for (int y = ty; y <= by; y++) { hud_pixel(img, lx, y, grey);
+                                     hud_pixel(img, rx, y, grey); }
+    for (int x = lx; x <= rx; x++) hud_pixel(img, x, my, grey);
+
+    /* where the lever sits: 1 and 2 on the left column, 3 and 4 on the
+     * right, neutral in the middle of the gate */
+    int kx, ky;
+    switch (gear) {
+    case 1:  kx = lx; ky = ty + 3;      break;
+    case 2:  kx = lx; ky = by - 3;      break;
+    case 3:  kx = rx; ky = ty + 3;      break;
+    case 4:  kx = rx; ky = by - 3;      break;
+    case 5:  kx = rx; ky = my - 6;      break;
+    default: kx = (lx + rx) / 2; ky = my; break;
+    }
+    for (int dx = -2; dx <= 2; dx++)
+        for (int dy = -2; dy <= 2; dy++)
+            if (dx * dx + dy * dy <= 5)
+                hud_pixel(img, kx + dx, ky + dy, gear ? red : grey);
+    for (int dx = -1; dx <= 1; dx++)
+        hud_pixel(img, kx + dx, ky - 3, white);
+}
+
 /* The numbers go on in the front end's own type, over the dial, because
  * a readable digit is more use than a period-correct one and the guest
  * has no font that size. */
@@ -1161,6 +1215,17 @@ static void hud_speedo_numbers(Rectangle game)
     int mw = ui_measure("200", ts);
     ui_text("200", (int)(game.x + (SPEEDO_X + SPEEDO_W - 2) * sx - mw),
             (int)(cy - ts), ts, (Color){150, 150, 155, 255});
+    {   /* the gear, as a number under its lever */
+        int gear = (int16_t)r16(A3 + 0x3054 + 0x28);
+        if (gear < 0) gear = 0;
+        if (gear > 5) gear = 5;
+        char g[8];
+        snprintf(g, sizeof g, "%d", gear);
+        int gs = fs * 3 / 4;
+        int gw = ui_measure(g, gs);
+        ui_text(g, (int)(game.x + (GEAR_X + GEAR_W * 0.5f) * sx - gw / 2),
+                (int)(game.y + (GEAR_Y + GEAR_H) * sy), gs, RAYWHITE);
+    }
 }
 
 /* ---- the course intro ------------------------------------------------
@@ -2294,6 +2359,113 @@ static void page_sound(void)
             16, WIN_H - BAR_H - 26, 18, LIGHTGRAY);
 }
 
+/* ---- typing the password, from where the game already is -------------
+ * Picking a course used to reboot and replay the whole session from the
+ * title: correct, and it made you watch the game start up again.  It
+ * does not need to.  The password screen is two menu moves away from
+ * where you already are, so the front end types it from HERE.
+ *
+ * The sequence and its gaps are the ones tools/course_session.py has
+ * always used, minus the first fire -- that one is the press that left
+ * the title, and by the time this runs it has happened:
+ *
+ *   up, up, up          GAME -> PASSWORD
+ *   fire                open the field
+ *   the letters         one every 40 frames
+ *   RETURN              submit
+ *   down, down, down    back to GAME
+ *   fire                start
+ *
+ * FOREST has no password, so it is one fire and nothing else.
+ */
+static const char *const COURSE_PASSWORD[COURSE_COUNT] = {
+    NULL, "TWILIGHT", "PEA SOUP", "THE SKIDS", "PEACHES", "LIVER POOL",
+    "BAGLEY", "E BOW"
+};
+/* Amiga raw key codes, the same table course_session.py carries. */
+static int pw_raw(char c)
+{
+    static const char *L = "ABCDEFGHIJKLMNOPQRSTUVWXYZ ";
+    static const unsigned char R[] = {
+        0x20,0x35,0x33,0x22,0x12,0x23,0x24,0x25,0x17,0x26,0x27,0x28,0x37,
+        0x36,0x18,0x19,0x10,0x13,0x21,0x14,0x16,0x34,0x11,0x32,0x15,0x31,
+        0x40 };
+    for (int i = 0; L[i]; i++) if (L[i] == c) return R[i];
+    return -1;
+}
+
+typedef struct { long at; uint8_t stick; int key; } PwStep;
+static PwStep pw_step[64];
+static int pw_count, pw_at;
+static long pw_clock;
+static int pw_running;
+
+static void pw_add(long at, uint8_t stick, int key)
+{
+    if (pw_count < 64) {
+        pw_step[pw_count].at = at;
+        pw_step[pw_count].stick = stick;
+        pw_step[pw_count].key = key;
+        pw_count++;
+    }
+}
+
+static void pw_begin(int course)
+{
+    pw_count = pw_at = 0;
+    pw_clock = 0;
+    const char *pass = (course >= 0 && course < COURSE_COUNT)
+                     ? COURSE_PASSWORD[course] : NULL;
+    if (!pass) {                       /* FOREST: just start */
+        pw_add(10, 0x10, -1);
+        pw_running = 1;
+        return;
+    }
+    pw_add(0,   0x01, -1);             /* up x3: GAME -> PASSWORD */
+    pw_add(60,  0x01, -1);
+    pw_add(120, 0x01, -1);
+    pw_add(200, 0x10, -1);             /* fire: open the field */
+    long f = 300;
+    for (const char *c = pass; *c; c++) {
+        int raw = pw_raw(*c);
+        if (raw >= 0) pw_add(f, 0, raw);
+        f += 40;
+    }
+    long ret = f + 40;
+    pw_add(ret, 0, 0x44);              /* RETURN */
+    long d = ret + 140;
+    pw_add(d,       0x02, -1);         /* down x3: back to GAME */
+    pw_add(d + 60,  0x02, -1);
+    pw_add(d + 120, 0x02, -1);
+    pw_add(d + 200, 0x10, -1);         /* fire: start */
+    pw_add(d + 400, 0x10, -1);
+    pw_add(d + 600, 0x10, -1);
+    pw_running = 1;
+}
+
+/* One frame of it.  Returns the stick to feed the guest. */
+static uint8_t pw_frame(void)
+{
+    uint8_t stick = 0;
+    /* a press is held for a few frames, the way a person holds one */
+    for (int i = 0; i < pw_count; i++)
+        if (pw_clock >= pw_step[i].at && pw_clock < pw_step[i].at + 6)
+            stick |= pw_step[i].stick;
+    while (pw_at < pw_count && pw_step[pw_at].at <= pw_clock) {
+        if (pw_step[pw_at].key >= 0) {
+            if (!amiga_kbd_idle()) break;      /* wait for the handshake */
+            amiga_key_event((uint8_t)pw_step[pw_at].key, false);
+        }
+        pw_at++;
+    }
+    pw_clock++;
+    if (pw_at >= pw_count && pw_clock > pw_step[pw_count - 1].at + 30) {
+        pw_running = 0;
+        SetTargetFPS(50);
+    }
+    return stick;
+}
+
 /* ---- start any course, without typing a password ---------------------
  * Every course past the first is behind a password, and the front end
  * knows all eight.  Rather than poke the game's state -- which skips
@@ -2513,7 +2685,7 @@ static void draw_game_picture(Rectangle dst)
 {
     /* below the HUD band, so the speed bar keeps its own red */
     car_recolour(framebuf, SCREEN_W, SCREEN_H, GAME_OY + 34);
-    if (race_on_screen()) hud_speedo(framebuf);
+    if (race_on_screen()) { hud_speedo(framebuf); hud_gear(framebuf); }
 
     Rectangle photo;
     if (road_extras && intro_photo(&photo)) {
@@ -2855,7 +3027,12 @@ int main(int argc, char **argv)
             sel_request = 0;
             sel_series = (want < 0);
             int course = sel_series ? 0 : want - 1;
-            if (sel_start(course, &whd)) mode = MODE_GAME;
+            /* From here, not from a reboot: the password screen is two
+             * menu moves away and watching the game start up again was
+             * the worst part of choosing a course. */
+            pw_begin(course);
+            SetTargetFPS(0);            /* the menus need not be watched */
+            mode = MODE_GAME;
         }
         /* the series: when a course's replay has handed over and the
          * next one is asked for, it starts from the top of the boot */
@@ -2935,6 +3112,17 @@ int main(int argc, char **argv)
              * controls has not left. */
             uint8_t p1 = 0, p2 = 0;
             static int p2_present;
+            if (pw_running) {
+                uint8_t b = pw_frame();
+                joy_state[0] = joy_state[1] = b;
+                amiga_run_frame();
+                {
+                    const int target = FRAME_SAMPLES * 4;
+                    int fill = amiga_audio_fill();
+                    if (fill < target) amiga_audio_generate(target - fill);
+                }
+                goto drawn;
+            }
             if (sel_running) {
                 uint8_t b = sel_frame();
                 joy_state[0] = joy_state[1] = b;
