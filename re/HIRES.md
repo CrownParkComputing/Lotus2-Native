@@ -43,6 +43,30 @@ stop stair-casing, which is the thing the eye actually catches.  Still
 the game's art, still its colours, and it can be checked against the 1x
 path by downsampling.  This is the one I would do.
 
+### The geometry is measurable, and it has been measured
+
+The strips are 1-bit masks and their shape is trivial once you look: a
+solid run of 336 pixels, then a GAP, then solid again.  The gap is the
+road.  So the width at each distance is not buried in the code -- it is
+in the art, and `tools/road_widths.py` reads it out:
+
+```
+idx   8  9 10 11 12 13 14 15 16 17 18 19 20 21 22 23
+px   16 18 20 21 23 24 26 28 32 34 36 38 40 42 44 46
+```
+
+Monotonic, 16 pixels at the horizon to 46 in the foreground, every strip
+starting its gap at the same offset.  The wider strips dither their
+edges, which is the game getting sub-pixel edges out of one bitplane --
+and the centre of that dithered band is the true edge, which is exactly
+what a vector renderer wants.
+
+Colour does not come from the strips at all.  The band loop writes a
+per-line colour RUN LIST through A2, and the copper turns that into the
+tarmac, verge and kerb colours.  So the bitplanes carry shape and the
+copper carries colour, which is why a vector road can keep the game's
+exact palette while drawing its own edges.
+
 **(b) Draw the road from its geometry.**  The per-line data has
 everything needed -- centre position, width index (which indexes the
 width table at A3-$4048 that `road_perspective` already uses), and the
