@@ -430,9 +430,10 @@ static void road_pc_hook(unsigned int pc)
     if (pc == road_capture_pc) road_grab();
 }
 
-/* Higher-resolution road: defined below, used by the track player. */
-static int hr_on;
-static void road_hires(Game *g);
+/* Markings and weather, drawn natively over the composited frame. */
+static void road_markings(Game *g, uint32_t *img);
+static void weather_native(uint32_t *img, int kind, int count);
+static int road_extras = 1;
 
 /* ---- native track player --------------------------------------------
  * The ROAD VIEW runs the GAME'S OWN road pipeline: the ported chain in
@@ -511,8 +512,7 @@ static void roadplay_load(int course)
     rp_ready = 1;
     rp_course = course;
     snprintf(rp_note, sizeof rp_note,
-             hr_on ? "the game's own road chain, edges placed exactly  "
-                   : "the game's own road chain in native C  "
+             "the game's own road chain in native C  "
              "(the road is drawn live; the skyline is the captured "
              "frame's, moved to the horizon)");
 }
@@ -618,7 +618,11 @@ static void roadplay_draw(float where)
      * runs with D6 = $98 against STORM's $6e), so something it writes
      * lands where the rain's never did.  Wiring it in before that is
      * understood would trade a correct picture for a black one. */
-    if (rp_course == 7) {
+    /* The game's own weather pass is still here, ported and gated
+     * (make verify-storm), and deliberately not run: weather_native()
+     * draws the rain and the snow instead.  Set this to 1 to see what
+     * the 68000 does, which is the only reason to keep the switch. */
+    if (0) {
         uint32_t shown = f32(&rp_g, A3 + 0x2f8a);
         pf32(&rp_g, A3 + 0x2f8a, f32(&rp_g, A3 + 0x2f8e));
         pf16(&rp_g, A3 + 0x2ebc, 0x60);       /* first stop of the machine */
@@ -664,7 +668,11 @@ static void roadplay_draw(float where)
     }
     if (use && composite(rp_g.chip, use, road_img) == 0) {
         road_valid = 1;
-        if (hr_on) road_hires(&rp_g);
+        road_markings(&rp_g, road_img);
+        /* SNOW and STORM get weather; the rest of the courses have none
+         * and inventing some would be a different game. */
+        weather_native(road_img, rp_course == 7 ? 1 : rp_course == 3 ? 2 : 0,
+                       rp_course == 7 ? 420 : 260);
         /* LOTUS2_EDGES: print, for each drawn line, the record the road
          * chain produced beside the edges that actually came out.  The
          * mapping from `line` to a screen x is the one thing the
@@ -979,88 +987,163 @@ static void render_road_frame(int segment)
     road_valid = 1;
 }
 
-/* ---- the road at higher resolution -----------------------------------
- * MEASURED, not derived.  For every drawn line the road chain leaves a
- * six-byte record at A3-$2bd8 -- (v, index, band) -- and printing those
- * beside the edges that actually came out of the 1x render gives the
- * mapping in one look:
+/* ---- markings and weather, drawn natively -----------------------------
+ * The road's geometry is known exactly, MEASURED rather than derived:
+ * printing each line's record beside the edges the 1x render produced
+ * gives `left + line == 335` on every row, so the left edge is at
+ * 335 - line and the width is twice the strip index.  Both edges are
+ * numbers before anything is drawn, which is what makes it possible to
+ * put things on the road properly.
  *
- *     row  line index  left right          left + line
- *     145   118    18   217   252              335
- *     151   196    45   139   227              335
- *     168   291   118    44   276              335
+ *     row  line index  left right     left + line
+ *     145   118    18   217   252         335
+ *     168   291   118    44   276         335
  *
- * so the road's LEFT edge is at `335 - line`, and its width is twice the
- * strip index -- which is also why the strips put their gap at offset
- * 336.  Both edges are therefore known exactly, as numbers, before
- * anything is drawn.
- *
- * The 1x path quantises the left edge to a byte plus a sixteen-step
- * barrel shift.  This one does not: it places both edges at their true
- * position in the output buffer and stretches the row's own pixels
- * between them, so the tarmac, the markings and the kerbs are still the
- * game's art and the converging edges stop stair-casing.
+ * Distance comes from the same place.  Road width on screen falls as
+ * 1/z, so z is proportional to 1/index -- no separate depth buffer is
+ * needed and none is kept.
  */
-#define HR_SCALE 3
-static uint32_t hr_img[VIEW_W * HR_SCALE * VIEW_H * HR_SCALE];
-static Texture2D hr_tex;
 
-static void road_hires(Game *g)
+typedef struct { float l, r; int have; } RoadEdge;
+static RoadEdge road_edge[VIEW_H];
+static uint16_t road_first, road_limit;
+
+/* Read this frame's edges out of the records the road chain just left. */
+static void road_read_edges(Game *g)
 {
-    const int W = VIEW_W * HR_SCALE, H = VIEW_H * HR_SCALE;
-    uint16_t first = f16(g, A3 + 0x30e4);
-    uint16_t limit = f16(g, A3 + 0x2eaa);
-    if (limit > VIEW_H) limit = VIEW_H;
-
-    /* the record for each source row, and the edges it implies */
-    static float lo[VIEW_H], hi[VIEW_H];
-    static int have[VIEW_H];
-    for (int i = 0; i < VIEW_H; i++) have[i] = 0;
-    uint32_t rec = A3 - 0x2bd8 + (uint32_t)(first * 2) * 3;
-    for (uint16_t ln = first; ln < limit; ln++) {
+    road_first = f16(g, A3 + 0x30e4);
+    road_limit = f16(g, A3 + 0x2eaa);
+    if (road_limit > VIEW_H) road_limit = VIEW_H;
+    for (int i = 0; i < VIEW_H; i++) road_edge[i].have = 0;
+    uint32_t rec = A3 - 0x2bd8 + (uint32_t)(road_first * 2) * 3;
+    for (uint16_t ln = road_first; ln < road_limit; ln++) {
         int16_t line = (int16_t)(0xb1 - f16(g, rec));
         uint16_t index = f16(g, rec + 2);
         rec += 6;
-        lo[ln] = 335.0f - line;
-        hi[ln] = lo[ln] + 2.0f * index;
-        have[ln] = 1;
+        if (!index) continue;
+        road_edge[ln].l = 335.0f - line;
+        road_edge[ln].r = road_edge[ln].l + 2.0f * index;
+        road_edge[ln].have = index;
     }
+}
 
-    for (int y = 0; y < H; y++) {
-        float sy = (float)y / HR_SCALE;
-        int i = (int)sy;
-        if (i > VIEW_H - 1) i = VIEW_H - 1;
-        const uint32_t *row = road_img + i * VIEW_W;
-        uint32_t *out = hr_img + (size_t)y * W;
+static void px(uint32_t *img, int x, int y, uint32_t c)
+{
+    if (x >= 0 && x < VIEW_W && y >= 0 && y < VIEW_H)
+        img[y * VIEW_W + x] = c;
+}
 
-        if (!have[i]) {                       /* sky, HUD: plain scale */
-            for (int x = 0; x < W; x++) out[x] = row[x / HR_SCALE];
-            continue;
+/* Centre dashes and edge lines, on every course.
+ *
+ * The game only draws markings where its strip art has them, which is
+ * why some roads have none.  These are drawn from the geometry instead,
+ * so they are there on all eight, and they scroll with the car because
+ * the phase comes from the course position rather than from a counter.
+ */
+void road_markings(Game *g, uint32_t *img)
+{
+    if (!road_extras) return;
+    road_read_edges(g);
+    const uint32_t white = 0xffe8e8e8u;
+    float travel = f32(g, A3 + 0x30d8) / 65536.0f;
+
+    for (uint16_t y = road_first; y < road_limit; y++) {
+        if (!road_edge[y].have) continue;
+        float l = road_edge[y].l, r = road_edge[y].r;
+        float w = r - l;
+        if (w < 6) continue;                  /* too far to resolve */
+
+        /* z from the width: the road is 1/z wide, so z is 1/width */
+        float z = 240.0f / w;
+        /* dashes every few units of z, marching with the car */
+        float phase = z * 1.6f - travel * 3.0f;
+        int on = ((int)floorf(phase) & 1) == 0;
+
+        int cx = (int)((l + r) * 0.5f);
+        int half = (int)(w * 0.02f);
+        if (half < 0) half = 0;
+        if (on)
+            for (int x = cx - half; x <= cx + half; x++) px(img, x, y, white);
+
+        /* a solid line just inside each edge, so the road reads at any
+         * width -- the dashes alone vanish into the horizon */
+        int inset = (int)(w * 0.06f);
+        if (inset < 1) inset = 1;
+        for (int k = 0; k <= (w > 40 ? 1 : 0); k++) {
+            px(img, (int)(l + inset) + k, y, white);
+            px(img, (int)(r - inset) - k, y, white);
         }
-        /* where this row's road WAS in the 1x picture, to sample from */
-        int sl = (int)(lo[i] + 0.5f), sr = (int)(hi[i] + 0.5f);
-        if (sl < 0) sl = 0;
-        if (sr > VIEW_W - 1) sr = VIEW_W - 1;
-        /* and where it belongs, to the fraction of a pixel */
-        float t = sy - i;
-        int j = (i + 1 < VIEW_H && have[i + 1]) ? i + 1 : i;
-        float l = lo[i] + (lo[j] - lo[i]) * t;
-        float r = hi[i] + (hi[j] - hi[i]) * t;
-        float span = r - l;
-        if (span < 1.0f) span = 1.0f;
+    }
+}
 
-        for (int x = 0; x < W; x++) {
-            float sx = (x + 0.5f) / HR_SCALE;
-            int from;
-            if (sx < l || sx > r) {
-                from = (int)sx;               /* verge and beyond: as drawn */
-            } else {
-                float u = (sx - l) / span;    /* across the road */
-                from = sl + (int)(u * (sr - sl));
-            }
-            if (from < 0) from = 0;
-            if (from > VIEW_W - 1) from = VIEW_W - 1;
-            out[x] = row[from];
+/* ---- weather ---------------------------------------------------------
+ * The game builds its rain and snow every frame out of blit records --
+ * four bands of shifted shapes queued and drawn by the blitter -- which
+ * is how you do it with a 7 MHz 68000 and no floating point.  Natively
+ * there is no reason to: particles can carry a real position and a real
+ * velocity, fall at a rate that does not depend on the frame, and be
+ * placed to the fraction of a pixel.
+ *
+ * They still take their colour from the game's own palette, sampled out
+ * of the rendered frame, so a storm looks like Lotus 2's storm rather
+ * than like weather from somewhere else.
+ */
+#define WX_MAX 700
+typedef struct { float x, y, vx, vy, len; } Drop;
+static Drop wx_drop[WX_MAX];
+static int wx_count, wx_kind;      /* 1 = rain, 2 = snow */
+static unsigned wx_seed = 1;
+
+static float wx_rand(void)
+{
+    wx_seed = wx_seed * 1103515245u + 12345u;
+    return (float)((wx_seed >> 8) & 0xffff) / 65536.0f;
+}
+
+static void wx_spawn(Drop *d, int kind, int anywhere)
+{
+    d->x = wx_rand() * VIEW_W;
+    d->y = anywhere ? wx_rand() * VIEW_H : -wx_rand() * 20.0f;
+    if (kind == 1) {                       /* rain: fast, slanted, long */
+        d->vy = 5.5f + wx_rand() * 3.0f;
+        d->vx = -1.1f - wx_rand() * 0.6f;
+        d->len = 3.0f + wx_rand() * 3.0f;
+    } else {                               /* snow: slow, drifting, round */
+        d->vy = 0.7f + wx_rand() * 0.8f;
+        d->vx = (wx_rand() - 0.5f) * 0.9f;
+        d->len = 1.0f;
+    }
+}
+
+/* `kind` 0 clears the weather, 1 rain, 2 snow. */
+void weather_native(uint32_t *img, int kind, int count)
+{
+    if (!road_extras) kind = 0;
+    if (kind != wx_kind || count != wx_count) {
+        wx_kind = kind;
+        wx_count = count > WX_MAX ? WX_MAX : count;
+        for (int i = 0; i < wx_count; i++) wx_spawn(&wx_drop[i], kind, 1);
+    }
+    if (!kind) return;
+
+    /* colour from the picture: the brightest thing in the sky for snow,
+     * and for rain a blue lifted out of the palette the frame is using */
+    uint32_t tint = kind == 1 ? 0xffd08040u : 0xfff0f0f0u;
+
+    for (int i = 0; i < wx_count; i++) {
+        Drop *d = &wx_drop[i];
+        d->x += d->vx;
+        d->y += d->vy;
+        if (kind == 2) d->x += sinf((d->y + i) * 0.08f) * 0.35f;
+        if (d->y > VIEW_H || d->x < -8 || d->x > VIEW_W + 8)
+            wx_spawn(d, kind, 0);
+        int x = (int)d->x, y0 = (int)d->y;
+        if (kind == 1) {
+            for (float t = 0; t < d->len; t += 1.0f)
+                px(img, (int)(d->x - d->vx * t * 0.35f),
+                   (int)(d->y - d->vy * t * 0.35f), tint);
+        } else {
+            px(img, x, y0, tint);
         }
     }
 }
@@ -1103,26 +1186,10 @@ static void course_draw_3d(Rectangle r)
     Rectangle dst = {inner.x + (inner.width - GAME_W * sc) * 0.5f,
                      inner.y + (inner.height - road_h * sc) * 0.5f,
                      GAME_W * sc, road_h * sc};
-    if (hr_on) {
-        if (!hr_tex.id) {
-            Image hi = { .data = hr_img, .width = VIEW_W * HR_SCALE,
-                         .height = VIEW_H * HR_SCALE, .mipmaps = 1,
-                         .format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8 };
-            hr_tex = LoadTextureFromImage(hi);
-            SetTextureFilter(hr_tex, TEXTURE_FILTER_BILINEAR);
-        }
-        UpdateTexture(hr_tex, hr_img);
-        DrawTexturePro(hr_tex,
-                       (Rectangle){0, ROAD_CROP * HR_SCALE,
-                                   GAME_W * HR_SCALE,
-                                   (GAME_H - ROAD_CROP) * HR_SCALE},
-                       dst, (Vector2){0, 0}, 0.0f, WHITE);
-    } else {
-        UpdateTexture(road_tex, road_img);
-        DrawTexturePro(road_tex,
-                       (Rectangle){0, ROAD_CROP, GAME_W, GAME_H - ROAD_CROP},
-                       dst, (Vector2){0, 0}, 0.0f, WHITE);
-    }
+    UpdateTexture(road_tex, road_img);
+    DrawTexturePro(road_tex,
+                   (Rectangle){0, ROAD_CROP, GAME_W, GAME_H - ROAD_CROP},
+                   dst, (Vector2){0, 0}, 0.0f, WHITE);
     DrawRectangleLinesEx(r, 1, GRID);
 }
 
@@ -2102,7 +2169,6 @@ int main(int argc, char **argv)
     amiga_set_pc_hook(road_pc_hook);
     bool paused = false, frozen = false, freeze_on_course = false;
 
-    hr_on = 1;
     bezel_scaler = UP_NAME[up_mode];
     if (offline) { frozen = true; SetTargetFPS(50); }
     long draws = 0;
@@ -2115,7 +2181,7 @@ int main(int argc, char **argv)
         if (IsKeyPressed(KEY_F11)) ToggleFullscreen();
         if (IsKeyPressed(KEY_ONE))   mode = MODE_GAME;
         if (IsKeyPressed(KEY_TWO))   mode = MODE_COURSE;
-        if (IsKeyPressed(KEY_F4)) hr_on = !hr_on;
+        if (IsKeyPressed(KEY_F4)) road_extras = !road_extras;
         if (IsKeyPressed(KEY_F3)) {
             up_mode = (up_mode + 1) % UP_COUNT;
             bezel_scaler = UP_NAME[up_mode];
