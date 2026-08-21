@@ -113,6 +113,16 @@ static int verify_verbs(Game *g)
  * .regs sibling.  Some routines take register inputs the caller set up
  * (the perspective pass inherits D3), so a standalone port has to be fed
  * the same values the game had. */
+/* Compare only this address range, when set.  A stage gate compares the
+ * WHOLE fast image, which is right when nothing else touches it -- and
+ * wrong the moment an interrupt lands inside the window.  On STORM one
+ * does: the music replay writes $2041bc-$20426c and a scatter around
+ * $20ac00-$20b0ff between two consecutive stage snapshots, none of which
+ * the stage owns.  Narrowing to the stage's own output says whether the
+ * PORT is right, which is the question being asked. */
+static uint32_t stage_lo, stage_hi;
+static void stage_range(uint32_t lo, uint32_t hi) { stage_lo = lo; stage_hi = hi; }
+
 static uint32_t stage_d[8], stage_a[8];
 static Blitter stage_blit;      /* chipset state from the snapshot */
 static Input stage_input;       /* pad state from the snapshot */
@@ -193,7 +203,10 @@ static int verify_stage(const char *name, const char *entry_fast,
     load_regs(entry_fast);
     stage(&g);
     long bad = 0, shown = 0;
-    for (uint32_t i = 0; i < GUEST_FAST_SIZE; i++) {
+    uint32_t scan_lo = stage_lo ? stage_lo - GUEST_FAST_ADDR : 0;
+    uint32_t scan_hi = stage_hi ? stage_hi - GUEST_FAST_ADDR : GUEST_FAST_SIZE;
+    stage_lo = stage_hi = 0;                 /* one call only */
+    for (uint32_t i = scan_lo; i < scan_hi; i++) {
         uint32_t addr = GUEST_FAST_ADDR + i;
         if (addr >= 0x217c00 && addr < 0x217e00) continue;  /* stack page */
         if (g.fast[i] != want[i]) {
@@ -493,6 +506,47 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--coplist") && i + 1 < argc)
             coplist = strtol(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--verify-verbs")) verbs = true;
+        else if (!strcmp(argv[i], "--verify-storm")) {
+            /* The same road stages, gated against a STORM race instead
+             * of a FOREST one.  A stage can be byte-exact on one course
+             * and wrong on another: the sky pass alone branches on
+             * $2f60, $30ec and $30fa, and FOREST exercises one path
+             * through it.  make course-snaps captures the pairs. */
+            /* Each stage is judged on the memory it OWNS.  The whole
+             * image cannot be used here: an interrupt lands inside these
+             * windows on STORM and writes the music replay's state. */
+            stage_range(0x207e00, 0x20c000);
+            int rc = verify_stage("storm road_sky",
+                                  "re/pipeline/storm/st_0_212f12_fast.bin",
+                                  "re/pipeline/storm/st_1_212f16_fast.bin",
+                                  road_sky);
+            stage_range(0x205d00, 0x20c000);
+            rc |= verify_stage("storm road_keyframes",
+                               "re/pipeline/storm/st_1_212f16_fast.bin",
+                               "re/pipeline/storm/st_2_212f1a_fast.bin",
+                               road_keyframes_near);
+            stage_range(0x205000, 0x20c000);
+            rc |= verify_stage("storm road_interpolate",
+                               "re/pipeline/storm/st_2_212f1a_fast.bin",
+                               "re/pipeline/storm/st_3_212f1e_fast.bin",
+                               stage_interpolate);
+            stage_range(0x205000, 0x20c000);
+            rc |= verify_stage("storm road_band_bounds",
+                               "re/pipeline/storm/st_3_212f1e_fast.bin",
+                               "re/pipeline/storm/st_4_212f22_fast.bin",
+                               stage_band_bounds);
+            stage_range(0x205428, 0x206000);
+            rc |= verify_stage("storm road_perspective",
+                               "re/pipeline/storm/st_4_212f22_fast.bin",
+                               "re/pipeline/storm/st_5_212f26_fast.bin",
+                               stage_perspective);
+            stage_range(0x205428, 0x206000);
+            rc |= verify_stage("storm road_blitqueue",
+                               "re/pipeline/storm/st_5_212f26_fast.bin",
+                               "re/pipeline/storm/st_6_212f2a_fast.bin",
+                               road_blitqueue);
+            return rc;
+        }
         else if (!strcmp(argv[i], "--verify-road")) {
             int rc = verify_stage("road_interpolate",
                                   "re/pipeline/road/st_3_212f1a_fast.bin",

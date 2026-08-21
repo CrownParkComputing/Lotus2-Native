@@ -416,7 +416,7 @@ test: selftest boot-test
 clean:
 	rm -rf build
 
-.PHONY: play-min course-snaps course-gate replay-gate override-check frame-gate debug coherence play no-musashi decode-check recomp recomp-gate statelog trace pcset drive all native boot-test selftest oracle test clean gate-capture road-capture render-gate view view-race track course
+.PHONY: play-min storm-snaps verify-storm course-snaps course-gate replay-gate override-check frame-gate debug coherence play no-musashi decode-check recomp recomp-gate statelog trace pcset drive all native boot-test selftest oracle test clean gate-capture road-capture render-gate view view-race track course
 
 # Per-course race snapshots for the viewer's ROAD VIEW.  Each is a real
 # race in that course, reached by replaying the password session that
@@ -424,6 +424,21 @@ clean:
 # palette and copper list to work from.  Big (9 MB each) and derived, so
 # they are not in the repository -- regenerate with this target.
 COURSE_SNAPS = night fog snow desert motorway marsh storm
+# Road-stage snapshots for a STORM race, so every stage can be gated on a
+# course other than FOREST.  `make verify-storm` runs them.
+storm-snaps: build/lotus2_recomp
+	mkdir -p re/pipeline/storm
+	SWIV_SNAP_PCS=212f12,212f16,212f1a,212f1e,212f22,212f26,212f2a,212f2e,212f32 \
+	SWIV_SNAP_FROM=6300 SWIV_SNAP_MAX=9 \
+	SWIV_SNAP_PREFIX=re/pipeline/storm/st_ \
+	./build/lotus2_recomp --dir $(INSTALL) \
+		--replay re/pipeline/courses/storm.rec \
+		--keys re/pipeline/courses/storm.keys --frames 6310 >/dev/null 2>&1
+	@echo "storm-snaps: done"
+
+verify-storm: build/lotus2_native
+	./build/lotus2_native --verify-storm
+
 course-snaps: build/lotus2_recomp
 	mkdir -p re/pipeline/courses
 	SWIV_SNAP_PCS=211e78 SWIV_SNAP_FROM=6300 SWIV_SNAP_MAX=1 \

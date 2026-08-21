@@ -44,3 +44,4 @@ re/pipeline/courses/*_0_211e78_*.bin
 re/pipeline/*.l2c
 re/pipeline/track_*.csv
 re/pipeline/track_*.svg
+re/pipeline/storm/*.bin
