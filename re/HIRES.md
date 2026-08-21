@@ -55,11 +55,34 @@ idx   8  9 10 11 12 13 14 15 16 17 18 19 20 21 22 23
 px   16 18 20 21 23 24 26 28 32 34 36 38 40 42 44 46
 ```
 
-Monotonic, 16 pixels at the horizon to 46 in the foreground, every strip
-starting its gap at the same offset.  The wider strips dither their
+Run over every strip, not just the first sixteen, and the table turns
+out to be a straight line: **the road's width in pixels is twice the
+strip index.**  Index 8 gives 16, index 63 gives 125 -- one short of 126
+because the widest strips dither their outer pixel.  There is no width
+table to find; the index IS the width.  The wider strips dither their
 edges, which is the game getting sub-pixel edges out of one bitplane --
 and the centre of that dithered band is the true edge, which is exactly
 what a vector renderer wants.
+
+### The per-line record, with real numbers
+
+At A3-$2bd8, stepping six bytes from line $30e4(A3) to $2eaa(A3):
+
+```
+line   v      line=$b1-v   index  band
+ 144  ff8f       290         14   5300
+ 145  ffa2       271         18   4100
+ 146  ffb2       255         23   3200
+ 147  ffb7       250         27   2b00
+ 148  ffbc       245         31   2500
+ 149  ffbf       242         36   1f00
+ 150  ffc1       240         39   1c00
+ 151  ffc1       240         45   1800
+```
+
+The index climbs steadily as the road comes toward the camera -- 14 wide
+at the far end of this run, 45 near -- which is the perspective, in one
+column of numbers.
 
 Colour does not come from the strips at all.  The band loop writes a
 per-line colour RUN LIST through A2, and the copper turns that into the
@@ -82,6 +105,17 @@ Cars, trees, HUD digits, the course-intro pictures: planar art in chip
 RAM.  Nothing recovers detail that was never drawn.  EXPORT on the
 GRAPHICS page saves them; redrawing them is artwork, and the front end
 substituting them by address is the easy half.
+
+## What is still unknown
+
+One thing: how `line` becomes a screen x.  The game splits it into a
+byte offset (`line >> 3`) and a sixteen-step barrel shift
+(`(line*2) & $1e`), and the destination has its own offsets on top
+(`a0 += $41a0`, then `d1*2 * $15`).  The arithmetic does not fall out
+cleanly by inspection -- an 8-pixel byte step with a 16-step shift
+double-covers -- so it wants measuring against the 1x render rather than
+deriving.  That is the last piece before either (a) or (b) can draw a
+line in the right place.
 
 ## Order
 

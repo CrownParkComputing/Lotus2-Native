@@ -16,7 +16,7 @@ A3 = 0x8000
 TABLE = A3 + 0x4e94          # $4e94(A3): longs, one strip pointer each
 
 
-def widths(fast, chip, first=0, last=32):
+def widths(fast, chip, first=0, last=64):
     out = []
     for idx in range(first, last):
         p = struct.unpack_from('>I', fast, TABLE + idx * 4)[0]
