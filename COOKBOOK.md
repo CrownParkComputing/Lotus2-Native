@@ -824,6 +824,27 @@ What is genuinely left, in dependency order:
   (`$62810`, 9-command dispatcher); no sound in the native build at all.
 * **`copper.txt` capture** (WHD_COPPER) for the road copper list.
 
+### all eight courses, and the passwords that reach them (2026-08-21)
+
+Everything past FOREST is behind the password screen, and the stick
+cannot type -- it moves the cursor and nothing else.  So courses 2-8 are
+reached by scripting the menu and injecting rawkey codes:
+`tools/course_session.py` builds the whole session, deriving the timing
+from the password's length so Return is not pressed mid-word.
+
+    1 FOREST     (none)        5 DESERT    PEACHES
+    2 NIGHT      TWILIGHT      6 MOTORWAY  LIVERPOOL
+    3 FOG        PEA SOUP      7 MARSH     BAGLEY
+    4 SNOW       THE SKIDS     8 STORM     E BOW
+
+MOTORWAY is **LIVERPOOL**, one word.  "LIVER POOL" is rejected and drops
+you back on FOREST, which looks exactly like the password screen not
+working.
+
+`make course-gate` runs the oracle against the native build on every one.
+Seven of eight are pixel-identical; STORM differs only in the rain, from
+a one-interrupt-frame timing difference (see below).
+
 ### data provenance settled (2026-08-21)
 
 Two other copies of the game were checked to see whether they held

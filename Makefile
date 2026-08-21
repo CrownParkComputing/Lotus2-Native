@@ -300,7 +300,7 @@ build/dasm: tools/dasm.c $(MUSASHI_DIR)/m68kdasm.c
 # leaves the other courses' instructions with guessed costs, and the small
 # errors accumulate into a one-frame lag that sends the game down a
 # different path -- which is how night, fog and snow each first failed.
-COURSES = night fog snow desert marsh storm
+COURSES = night fog snow desert motorway marsh storm
 re/pipeline/cycles.txt: build/lotus2 $(wildcard re/pipeline/courses/*.rec)
 	SWIV_CYCLES=build/cyc_forest.txt ./build/lotus2 --dir $(INSTALL) \
 		--frames 9000 --fire-from 2100 --fire-period 100 >/dev/null 2>&1
