@@ -349,7 +349,14 @@ static void stage_distance(Game *g)
     car_distance(g, A3_BASE + 0x3054, r);
     stage_expect(0, r[0]); stage_expect(1, r[1]);
 }
-static void stage_shape(Game *g) { car_shape(g, A3_BASE + 0x3054); }
+static void stage_shape(Game *g)
+{
+    Regs r;
+    for (int i = 0; i < 8; i++) { r.d[i] = stage_d[i]; r.a[i] = stage_a[i]; }
+    car_shape_regs(g, &r);
+    for (int i = 0; i < 8; i++) stage_expect(i, r.d[i]);
+    stage_expect(8 + 0, r.a[0]);
+}
 static void stage_tick(Game *g) { car_tick(g, A3_BASE + 0x3054); }
 
 /* the four scenery iterators, each handing back its advanced pointer */

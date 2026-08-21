@@ -77,8 +77,17 @@ static int ov_car_distance(M68K *m)
     ret(m, 149);
     return 1;
 }
-__attribute__((unused)) static int ov_car_shape(M68K *m)
-{ Game g = game_view(); car_shape(&g, m->a[4]); ret(m, 461); return 1; }
+static int ov_car_shape(M68K *m)
+{
+    Game g = game_view();
+    Regs r;
+    for (int i = 0; i < 8; i++) { r.d[i] = m->d[i]; r.a[i] = m->a[i]; }
+    car_shape_regs(&g, &r);
+    for (int i = 0; i < 8; i++) { m->d[i] = r.d[i]; }
+    m->a[0] = r.a[0];
+    ret(m, 461);
+    return 1;
+}
 __attribute__((unused)) static int ov_car_tick(M68K *m)
 { Game g = game_view(); car_tick(&g, m->a[4]); ret(m, 1564); return 1; }
 static int ov_car_frame_latch(M68K *m)
@@ -164,6 +173,7 @@ static struct { uint32_t pc; NativeFn fn; const char *name; } table[] = {
     { 0x2169e0, ov_span_fill,       "span_fill" },
     { 0x215b58, ov_scen_sort,       "scen_sort" },
     { 0x212662, ov_car_distance,    "car_distance" },
+    { 0x212ba4, ov_car_shape,       "car_shape" },
 };
 #define NOVERRIDE ((int)(sizeof table / sizeof table[0]))
 

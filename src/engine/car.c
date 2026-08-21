@@ -683,3 +683,73 @@ void race_frame_publish(Game *g)
         pf16(g, a4 + 0x88, f16(g, a4 + 0x66));
     }
 }
+
+/* ---- $212ba4 with full register semantics ----
+ *
+ * The existing car_shape() reproduces this routine's effect on memory,
+ * which is all a test harness needed.  Replacing the routine outright
+ * needs more: every register it changes has to come back too, or the
+ * caller resumes on stale values.  See tools/override_check.py.
+ *
+ * The subtlety is width.  `muls.w D3,D2` writes all 32 bits of D2, and
+ * the `asr.l #8` after it shifts the long -- but the `add.w`/`neg.w` that
+ * follow touch only the low word, so D2 leaves with a meaningful high
+ * half.  `ext.w` and `move.b` likewise preserve the bits above what they
+ * write, so D1, D2 and D3 all depend on what the CALLER had in them.
+ * That is why this takes the register file rather than arguments.
+ */
+void car_shape_regs(Game *g, Regs *r)
+{
+    const uint32_t a4 = r->a[4];
+    r->d[0] = f32(g, a4 + 0x08);                    /* move.l ($8,A4),D0 */
+
+    uint32_t d0 = r->d[0];
+    uint32_t d7 = (d0 >> 16) | (d0 << 16);          /* move.l D0,D7; swap */
+    d7 = setw(d7, (uint16_t)(w(d7) << 4));          /* asl.w #4 */
+    uint32_t d3 = setw(r->d[3], w(d0));             /* move.w D0,D3 */
+    d3 = setw(d3, (uint16_t)(w(d3) >> 4));          /* lsr.w #4 */
+    const uint32_t a0 = A3 - 0x1e78;
+    const uint32_t rec = (uint32_t)(int32_t)(int16_t)w(d7);
+
+    uint32_t d1 = r->d[1], d2 = r->d[2], d4, d5, d6;
+
+    /* near edge */
+    d2 = (d2 & 0xffffff00u) | g->fast[(a0 + 1 + rec) - GUEST_FAST_ADDR];
+    d2 = (d2 & 0xffffff00u) | (uint8_t)((uint8_t)d2 + (uint8_t)d2);  /* add.b */
+    d2 = setw(d2, (uint16_t)(int16_t)(int8_t)(uint8_t)d2);           /* ext.w */
+    d2 = (uint32_t)((int32_t)(int16_t)w(d3) * (int32_t)(int16_t)w(d2)); /* muls.w */
+    d2 = (uint32_t)((int32_t)d2 >> 8);                               /* asr.l #8 */
+    d1 = (d1 & 0xffffff00u) | g->fast[(a0 + 0xd + rec) - GUEST_FAST_ADDR];
+    d1 = setw(d1, (uint16_t)(int16_t)(int8_t)(uint8_t)d1);
+    d1 = setw(d1, (uint16_t)(w(d1) << 5));
+    d2 = setw(d2, (uint16_t)(w(d2) + w(d1)));
+    d2 = setw(d2, (uint16_t)(-(int16_t)w(d2)));
+    d5 = setw(r->d[5], w(d2));
+
+    /* far edge */
+    d2 = (d2 & 0xffffff00u) | g->fast[(a0 + 0 + rec) - GUEST_FAST_ADDR];
+    d2 = setw(d2, (uint16_t)(int16_t)(int8_t)(uint8_t)d2);
+    d2 = setw(d2, (uint16_t)(w(d2) + w(d2)));
+    d4 = setw(r->d[4], w(d2));                      /* before the scaling */
+    d2 = (uint32_t)((int32_t)(int16_t)w(d3) * (int32_t)(int16_t)w(d2));
+    d2 = (uint32_t)((int32_t)d2 >> 8);
+    d1 = (d1 & 0xffffff00u) | g->fast[(a0 + 0xc + rec) - GUEST_FAST_ADDR];
+    d1 = setw(d1, (uint16_t)(int16_t)(int8_t)(uint8_t)d1);
+    d1 = setw(d1, (uint16_t)(w(d1) << 5));
+    d2 = setw(d2, (uint16_t)(w(d2) + w(d1)));
+    d2 = setw(d2, (uint16_t)(-(int16_t)w(d2)));
+    d6 = setw(r->d[6], w(d2));
+
+    d0 = setw(d0, (uint16_t)(w(d0) >> 6));          /* lsr.w #6 */
+    d0 = setw(d0, (uint16_t)(w(d0) >> 8));          /* lsr.w #8 */
+    d0 = setw(d0, (uint16_t)(w(d0) + w(d0)));
+    d7 = setw(d7, (uint16_t)(w(d7) + w(d0)));
+
+    pf16(g, a4 + 0x12, w(d4));                      /* $212baa */
+    pf16(g, a4 + 0x16, w(d5));
+    pf16(g, a4 + 0x14, w(d6));
+
+    r->d[0] = d0; r->d[1] = d1; r->d[2] = d2; r->d[3] = d3;
+    r->d[4] = d4; r->d[5] = d5; r->d[6] = d6; r->d[7] = d7;
+    r->a[0] = a0;
+}

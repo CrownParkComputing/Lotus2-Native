@@ -116,12 +116,23 @@ void scen_project(Game *g, Span *s);           /* $2160f2 -> $216346 */
 void scen_emit(Game *g, Span *s);              /* $216346 */
 uint32_t scen_shape_ptr(Game *g, uint32_t a1, uint32_t d6);  /* $215dac */
 
+/* The 68000 register file, for ports that must reproduce a routine's
+ * effect on registers and not only on memory -- the condition for
+ * replacing that routine outright.  See tools/override_check.py. */
+typedef struct { uint32_t d[8], a[8]; } Regs;
+
+/* word ops leave the upper half of a data register alone */
+static inline uint16_t w(uint32_t r) { return (uint16_t)r; }
+static inline uint32_t setw(uint32_t r, uint16_t v)
+{ return (r & 0xffff0000u) | v; }
+
 /* ---- car model ---- */
 void car_update(Game *g, uint32_t view);       /* $2129f2 */
 void car_checkpoint(Game *g, uint32_t view);   /* $212680 */
 void car_clock(Game *g, uint32_t view);        /* $21263c */
 void car_distance(Game *g, uint32_t view, uint32_t *regs); /* $212662; D0,D1 */
 void car_shape(Game *g, uint32_t view);        /* $212ba4 */
+void car_shape_regs(Game *g, Regs *r);         /* $212ba4, registers too */
 void car_drive(Game *g, uint32_t view);        /* $212734 */
 void car_tick(Game *g, uint32_t view);         /* $21270a */
 uint32_t car_frame_latch(Game *g);             /* $211dd4; returns A1 */

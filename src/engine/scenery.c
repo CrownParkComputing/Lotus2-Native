@@ -19,10 +19,6 @@
 
 #define A3 0x208000u
 
-/* word ops on a 68000 data register: the high half is untouched */
-static inline uint16_t w(uint32_t r) { return (uint16_t)r; }
-static inline uint32_t setw(uint32_t r, uint16_t v)
-{ return (r & 0xffff0000u) | v; }
 /* adda.w: the operand is sign-extended and added to the WHOLE register */
 static inline uint32_t addaw(uint32_t a, uint16_t v)
 { return a + (uint32_t)(int32_t)(int16_t)v; }
