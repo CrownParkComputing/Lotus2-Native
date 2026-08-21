@@ -275,7 +275,8 @@ $(DECODE_IMAGE): tools/decode_image.py re/pipeline/combined.bin \
 # when not).  Both were learned by breaking the game.
 override-check: build/dasm $(DECODE_IMAGE)
 	python3 tools/override_check.py 21263c 211dd4 2169e0 2129f2 212680 \
-		212662 212ba4 21270a 215b58 215adc 2160f2 215a7a 215a9c 215b24
+		212662 212ba4 21270a 215b58 215adc 2160f2 215a7a 215a9c 215b24 \
+		20d7e8
 
 coherence: build/lotus2 $(DECODE_IMAGE)
 	python3 tools/image_coherence.py

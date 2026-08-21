@@ -37,6 +37,28 @@ def entries(targets):
     return hits
 
 CALLS = ('bsr', 'jsr')
+
+def body_calls(entry, limit=0x400):
+    """Every subroutine the routine itself calls.
+
+    An override replaces the whole routine, so anything it calls must be
+    modelled by the port too.  car_update looked eligible on both static
+    conditions and is not: it calls $20d7e8, the sound-voice allocator,
+    which the C port openly does not model -- and its snapshot gate passed
+    only because the one captured call did not take that path.  Passing a
+    gate on a single call is not evidence that a port is complete.
+    """
+    out = subprocess.run(['./build/dasm', IMAGE, hex(entry),
+                          hex(entry + limit)], capture_output=True,
+                         text=True).stdout
+    calls = []
+    for line in out.splitlines():
+        m = re.match(r'\$([0-9a-f]{6})\s+(bsr|jsr)\s+\$([0-9a-f]+)', line)
+        if m:
+            calls.append((int(m.group(1), 16), int(m.group(3), 16)))
+        if re.match(r'\$[0-9a-f]{6}\s+rts', line):
+            break
+    return calls
 targets = [int(a, 16) for a in sys.argv[1:]]
 if not targets:
     raise SystemExit(__doc__)
@@ -54,6 +76,11 @@ for t in targets:
     elif calls == 0:
         print("$%06x  no entries found -- check the scanned range" % t)
     else:
-        print("$%06x  call-only (%d BSR/JSR): entry condition satisfied"
-              % (t, calls))
+        inner = body_calls(t)
+        note = ""
+        if inner:
+            note = "; calls " + ' '.join('$%06x' % c for _, c in inner) + \
+                   " -- the port must model each"
+        print("$%06x  call-only (%d BSR/JSR): entry condition satisfied%s"
+              % (t, calls, note))
 sys.exit(1 if bad else 0)
