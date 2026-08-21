@@ -1345,22 +1345,35 @@ static void gfx_decode(void)
  * Returns 1 when it found a usable list.
  */
 static uint32_t gfx_coplc;
+static int gfx_repointed;   /* the copper moves the planes mid-frame */
+static int gfx_export;      /* EXPORT was clicked this frame */
 static int gfx_read_display(void)
 {
     uint32_t at = amiga_get_coplc() & (CHIP_SIZE - 1);
     if (at < 0x400) return 0;
     gfx_coplc = at;
     uint32_t ptr[6] = {0};
-    int planes = 0, mod1 = 0, have = 0;
+    int planes = 0, mod1 = 0, have = 0, repoint = 0;
+    unsigned seen_ptr = 0;
     for (int i = 0; i < 4096; i++, at += 4) {
         if (at + 3 >= CHIP_SIZE) break;
         uint16_t reg = (uint16_t)((chip[at] << 8) | chip[at + 1]);
         uint16_t dat = (uint16_t)((chip[at + 2] << 8) | chip[at + 3]);
         if (reg >= 0x00e0 && reg <= 0x00f3) {
+            /* The FIRST write wins.  Lotus re-points the bitplanes from
+             * the copper part-way down the screen -- that is how the
+             * road is drawn -- so taking the last write starts the raw
+             * view somewhere in the middle of the picture, which is what
+             * made the planes look like garbage while the composited
+             * view beside them was fine. */
             int p = (reg - 0x00e0) / 4;
-            if (reg & 2) ptr[p] = (ptr[p] & 0xffff0000u) | dat;
-            else         ptr[p] = (ptr[p] & 0xffffu) | ((uint32_t)dat << 16);
+            if (!(seen_ptr & (1u << (p * 2 + ((reg & 2) ? 1 : 0))))) {
+                if (reg & 2) ptr[p] = (ptr[p] & 0xffff0000u) | dat;
+                else ptr[p] = (ptr[p] & 0xffffu) | ((uint32_t)dat << 16);
+                seen_ptr |= 1u << (p * 2 + ((reg & 2) ? 1 : 0));
+            }
             if (p + 1 > have) have = p + 1;
+            repoint++;
         } else if (reg == 0x0100) {
             planes = (dat >> 12) & 7;
         } else if (reg == 0x0108) {
@@ -1370,6 +1383,9 @@ static int gfx_read_display(void)
         }
     }
     if (!have || (ptr[0] & ~1u) < 0x400) return 0;
+    /* More pointer writes than planes means the copper moves them
+     * during the frame, and no single stride describes the result. */
+    gfx_repointed = repoint > have * 2;
     gfx_addr = ptr[0] & ~1u;
     gfx_planes = planes >= 1 && planes <= 6 ? planes
                : (have >= 1 && have <= 6 ? have : 4);
@@ -1451,6 +1467,12 @@ static void page_gfx(void)
         { gfx_plane_gap = gfx_stride * gfx_rows; gfx_from_copper = 0; }
     if (button((Rectangle){bx + 1792, by, 110, bh}, "FOLLOW SCREEN",
                gfx_from_copper)) gfx_from_copper = 1;
+    /* Save what is on this page.  There is no folder of game art in the
+     * repository and there is not going to be one -- it is the retail
+     * game's -- so ripping is something you do, into a directory that is
+     * gitignored, rather than something shipped. */
+    if (button((Rectangle){bx + 1908, by, 100, bh}, "EXPORT", 0))
+        gfx_export = 1;
 
     /* The screen as the machine shows it: the compositor is a per-line
      * copper interpreter that make render-gate proves pixel-identical to
@@ -1482,20 +1504,58 @@ static void page_gfx(void)
 
     gfx_decode();
     UpdateTexture(gfx_tex, gfx_img);
+
+    if (gfx_export) {
+        gfx_export = 0;
+        char path[256];
+        int w = gfx_words * 16 > GFX_MAX_W ? GFX_MAX_W : gfx_words * 16;
+        int h = gfx_rows > GFX_MAX_H ? GFX_MAX_H : gfx_rows;
+        /* crop out of the padded working buffer, so the file is the
+         * picture and not the buffer it was decoded into */
+        static uint32_t crop[GFX_MAX_W * GFX_MAX_H];
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++)
+                crop[y * w + x] = gfx_img[y * GFX_MAX_W + x];
+        Image im = { .data = crop, .width = w, .height = h, .mipmaps = 1,
+                     .format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8 };
+        snprintf(path, sizeof path, "graphics/planes_%06x_%dp_%dx%d.png",
+                 gfx_addr, gfx_planes, w, h);
+        ExportImage(im, path);
+        if (have_shot) {
+            Image si = { .data = shot, .width = VIEW_W, .height = VIEW_H,
+                         .mipmaps = 1,
+                         .format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8 };
+            snprintf(path, sizeof path, "graphics/screen_%06x.png",
+                     gfx_coplc);
+            ExportImage(si, path);
+        }
+    }
     Rectangle area = {16, 156, WIN_W - 32 - (have_shot ? 656 : 0),
                       WIN_H - BAR_H - 176};
+    /* the caption gets its own strip: over the picture it sat on the
+     * game's own HUD and neither could be read */
+    const int GCAP = 28;
     DrawRectangleRec(area, PANEL_BG);
-    float sc = area.width / (float)(gfx_words * 16);
-    float sy = area.height / (float)gfx_rows;
+    Rectangle pic = {area.x, area.y + GCAP, area.width, area.height - GCAP};
+    float sc = pic.width / (float)(gfx_words * 16);
+    float sy = pic.height / (float)gfx_rows;
     if (sy < sc) sc = sy;
-    Rectangle dst = {area.x + (area.width - gfx_words * 16 * sc) / 2,
-                     area.y + (area.height - gfx_rows * sc) / 2,
+    Rectangle dst = {pic.x + (pic.width - gfx_words * 16 * sc) / 2,
+                     pic.y + (pic.height - gfx_rows * sc) / 2,
                      gfx_words * 16 * sc, gfx_rows * sc};
     DrawTexturePro(gfx_tex,
                    (Rectangle){0, 0, (float)(gfx_words * 16), (float)gfx_rows},
                    dst, (Vector2){0, 0}, 0.0f, WHITE);
     DrawRectangleLinesEx(area, 1, GRID);
-    ui_text("BITPLANES", (int)area.x + 8, (int)area.y + 6, 20, LABEL);
+    /* One palette for the whole picture, because that is what a bitmap
+     * has.  The screen beside it can differ in colour and still be the
+     * same data: the copper rewrites the palette per line, which is how
+     * the sky gets its gradient. */
+    snprintf(buf, sizeof buf, "BITPLANES   one palette%s",
+             gfx_repointed ? "; the copper also moves these planes "
+                             "mid-frame, so one stride shows part of "
+                             "the screen" : "");
+    ui_text(buf, (int)area.x + 8, (int)area.y + 5, 20, LABEL);
 }
 
 /* ---- SOUND: the four Paula voices ------------------------------------
@@ -1772,6 +1832,9 @@ int main(int argc, char **argv)
      * instead, or the game is simply too fast to drive. */
     SetTargetFPS(use_bezel ? 50 : 0);
     canvas_rt = LoadRenderTexture(WIN_W, WIN_H);
+    /* somewhere for the GRAPHICS page's EXPORT to land; gitignored,
+     * because what it saves is the retail game's art */
+    if (!DirectoryExists("graphics")) MakeDirectory("graphics");
     ui_font = GetFontDefault();
     static const char *fonts[] = {
         "assets/DejaVuSans.ttf", "/usr/share/fonts/TTF/DejaVuSans.ttf",
