@@ -36,3 +36,11 @@ re/pipeline/cycles.txt
 bezel.png
 lotus2.png
 re/pipeline/courses/*_0_211e78_*.bin
+
+# Extracted game data.  These are slices of the retail game's own tables
+# (the 1024-segment course record array and views of it), so they belong
+# with original/ rather than in a public repository.  Regenerate with
+# `make road-capture && make course && make track`.
+re/pipeline/*.l2c
+re/pipeline/track_*.csv
+re/pipeline/track_*.svg

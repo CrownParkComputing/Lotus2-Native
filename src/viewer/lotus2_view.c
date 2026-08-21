@@ -1266,7 +1266,8 @@ static void page_game(void)
                       SCREEN_W * s, SCREEN_H * s };
     DrawTexturePro(game_screen, src, dst, (Vector2){0, 0}, 0.0f, WHITE);
     ui_text("1 GAME   2 COURSE   3 TRACK   4 GEOM   5 DISPLAY   "
-            "F5 freeze   F11 full   P pause", 16, 4, 18, LABEL);
+            "F5 freeze   F11 full   P pause   |   pad SELECT pages",
+            16, 4, 18, LABEL);
 }
 
 int main(int argc, char **argv)
@@ -1323,6 +1324,27 @@ int main(int argc, char **argv)
     SetTraceLogLevel(LOG_WARNING);
     InitWindow(WIN_W, WIN_H, "Lotus 2 - native RE viewer");
     SetExitKey(KEY_NULL);
+    /* The logical canvas is 1920x1080 and gets blitted scaled to fit, but
+     * the WINDOW opened at that size regardless -- so on any desktop
+     * smaller than 1080 rows of work area the bottom of it, control bar
+     * included, was off the screen.  Fit the monitor, then centre. */
+    {
+        int mon = GetCurrentMonitor();
+        int mw = GetMonitorWidth(mon), mh = GetMonitorHeight(mon);
+        if (mw > 320 && mh > 240) {
+            int aw = mw - 80, ah = mh - 120, ww = WIN_W, wh = WIN_H;
+            if (ww > aw || wh > ah) {
+                float k = (float)aw / ww;
+                if ((float)ah / wh < k) k = (float)ah / wh;
+                ww = (int)(ww * k);
+                wh = (int)(wh * k);
+                SetWindowSize(ww, wh);
+            }
+            Vector2 mp = GetMonitorPosition(mon);
+            SetWindowPosition((int)mp.x + (mw - ww) / 2,
+                              (int)mp.y + (mh - wh) / 2);
+        }
+    }
     /* Run flat out while booting into a race; the tool only needs 50 Hz
      * once the course is loaded and the emulation is frozen. */
     SetTargetFPS(0);
@@ -1377,6 +1399,18 @@ int main(int argc, char **argv)
         if (IsKeyPressed(KEY_THREE)) mode = MODE_TRACK;
         if (IsKeyPressed(KEY_FOUR))  mode = MODE_GEOM;
         if (IsKeyPressed(KEY_FIVE))  mode = MODE_DISPLAY;
+        /* Pad navigation, so the debug pages are reachable without
+         * reaching for the keyboard.  The face and shoulder buttons are
+         * already taken by the pages themselves (scrub, jump, drive,
+         * zoom), so paging lives on SELECT and START. */
+        if (IsGamepadAvailable(0)) {
+            if (IsGamepadButtonPressed(0, GAMEPAD_BUTTON_MIDDLE_LEFT))
+                mode = (mode + 1) % (MODE_DISPLAY + 1);
+            if (IsGamepadButtonPressed(0, GAMEPAD_BUTTON_MIDDLE_RIGHT))
+                mode = MODE_GAME;
+            if (IsGamepadButtonPressed(0, GAMEPAD_BUTTON_MIDDLE))
+                ToggleFullscreen();
+        }
         if (IsKeyPressed(KEY_F2)) {
             Image s = LoadImageFromScreen();
             ExportImage(s, "lotus2view.png");
@@ -1443,7 +1477,8 @@ int main(int argc, char **argv)
             ExportImage(s, "lotus2view.png");
             UnloadImage(s);
         }
-        ui_text("P pause emulation   F2 screenshot   [ ] scrub",
+        ui_text("P pause emulation   F2 screenshot   [ ] scrub   "
+                "pad: SELECT next page, START game page",
                 8, (int)r2 + 12, 18, LIGHTGRAY);
         EndTextureMode();
 

@@ -1,68 +1,94 @@
-# Lotus2-Native
+# Lotus Turbo Challenge 2 — native
 
-Native port of *Lotus Turbo Challenge 2* (CD32 / AGA, 1991, Magnetic Fields /
-Gremlin).  Currently at the **ORACLE** stage: a working Musashi-based WHDLoad
-host that boots `Lotus2CD32.slave`, decrunches the slave's RNC2 install body,
-loads the game from `Disk.1` (122 disk loads, ~546 KB), applies the slave's
-patches, and renders non-blank frames.
+A native port of *Lotus Turbo Challenge 2* (Amiga CD32 / AGA, 1991,
+Magnetic Fields / Gremlin Graphics).
 
-## Current state (2026-08-20)
-
-| Stage          | Status    | Note                                                       |
-| -------------- | --------- | ---------------------------------------------------------- |
-| INGEST         | done      | `cp -r /tmp/lotus2/Lotus2CD32/* original/Lotus2CD32/`      |
-| ORACLE         | running   | RNC2 fixed; 2000-frame boot: title + car screens, music    |
-| base-detect    | done      | A3 = $208000 (99.6%); `re/pipeline/bases.json`             |
-| dispatch-table | done      | family = phase-direct; PT-replay cmd table; `handlers.txt` |
-| objwalk        | done      | gameplay reached; road interpolator mapped; `objlog.txt`   |
-| seed-disasm    | done      | Ghidra: 192 funcs, `disasm/decomp.c`; A3 pinned $208000    |
-| TRANSLATE      | running   | 24 routines + 2 composed chains ported, all byte-exact     |
-| render-gate    | done      | title AND mid-race frames pixel-exact vs oracle            |
-| drive-loop     | done      | `make drive`: emulator-free race frame from a snapshot     |
-| PARITY         | future    | needs scheduler $21508a, sprites/HUD, sequencer, audio     |
-
-## Cookbook anchors
-
-* Project root: `/home/jon/Lotus2-Native/`
-* Retail binary location: `original/Lotus2CD32/`
-* Host source: `src/host/` (copied from SWIV-Amiga; per-cookbook,
-  the chipset emulation is title-neutral)
-* Musashi: `third_party/musashi/`
-* Pipeline artefacts: `re/pipeline/`
-* Known issues: `issues/known-issues.toml`
-* Stage manifest: `lotus2_project.json`
-
-## Commands
+The shipped binary contains **no emulator**.  The game's 68000 code is
+statically recompiled to C ahead of time, and a growing set of routines
+has been replaced outright by hand-written native C.  `make no-musashi`
+is a build gate that fails if a single emulator symbol reaches the
+native executable.
 
 ```
-make            # build/lotus2 (headless runner) + build/lotus2_native
-make boot-test  # 300-frame boot attempt
-make selftest   # chipset self-tests (1 known pre-existing video FAIL)
-make oracle     # 600-frame capture (--ppm-seq, --ppm-every, --trace)
-make gate-capture  # oracle frame+RAM pairs at frames 2000 and 5600
-make road-capture  # per-stage RAM snapshots of the racing render chain
-make render-gate   # verbs + road stages byte-exact, frames pixel-exact
-make statelog      # ~11s per-instruction register trace of the race frame
-make trace PC=21508a   # annotated listing of one call of that routine
-make pcset         # which PCs a full run into a race ever reaches
-make clean
+make play        # play it
+make debug       # play it with the RE pages one keypress away
 ```
 
-`SWIV_PCSET=re/pipeline/pcset.txt` before `./build/lotus2` enables the
-PC-set dump; `SWIV_STATELOG=re/pipeline/statelog.bin` enables per-
-instruction register tracing.
+You supply the game.  The retail WHDLoad install lives in
+`original/Lotus2CD32/` and is never committed — see *Legal* below.
 
-## Retail content
+## How it is built
 
-The original WHDLoad install (slave, `Disk.1`, `ReadMe`, `Manual`,
-`Message`, `Codes`, plus the `.info` siblings) lives in
-`original/Lotus2CD32/`.  This directory is in `.gitignore` and never
-committed.  `Disk.1` is a RawDIC dump; it is consumed via the SWIV
-host's `disk_load()` path.
+**The recompiler.**  `tools/m68k2c.py` turns 68000 into C: one `switch`
+over the program counter, over a machine struct.  It decodes from the
+PCs a real run actually executed, then follows the code by recursive
+descent and through jump tables, so the instruction boundaries are
+observed rather than guessed.  Cycle costs are measured per EDGE (this
+PC to that next PC) from the oracle's own counter, not averaged per
+instruction — the difference matters, because the game's interrupt
+timing depends on it.
 
-## License & legal
+**The oracle.**  Musashi runs the same game beside it and produces
+entry/exit RAM and register images.  It is a measuring instrument only;
+nothing from `third_party/musashi/` is linked into the native build.
 
-The host source, the runner, the RNC2 decoder, and the project manifest
-are mine to share.  The retail slave and `Disk.1` are not.  See
-`/home/jon/recomp-cookbook/cookbook/RECOMP_COOKBOOK.md` §"Repository and
-legal boundary" for the rule we follow.
+**The gates.**  Nothing is accepted because it looks right.
+
+| gate | what it demands |
+| --- | --- |
+| `make recomp-gate` | 28 recompiled routines, register- and memory-exact against the oracle |
+| `make frame-gate` | 30 checkpoints through a full boot-and-race, pixel-identical |
+| `make render-gate` | the native compositor's frame appears verbatim inside the oracle's raster |
+| `make course-gate` | all eight courses reached and compared |
+| `make override-check` | whether a routine may be replaced at all: entered only by BSR/JSR, and every register it changes reproduced |
+| `make no-musashi` | no emulator symbols in the native binary |
+
+**The engine.**  `src/engine/` is the ported game: the road pipeline
+(sky bands, keyframe generator, edge interpolator, perspective pass,
+blit queue, band blitter), the car model, the input decoder, a blitter,
+and a per-line copper compositor.  Each routine carries the address it
+came from and the snapshot that proves it.
+
+## The RE pages
+
+`make debug` gives the game plus five pages.  The COURSE page runs the
+game's own road chain over a race snapshot and seeks it by writing the
+course position long at `$30d8(A3)` — the same record index the game's
+generator walks the course table by — so dragging the scrub bar drives
+the real interpolator, beside a top-down map, a gradient profile and a
+whole-course strip read from the same table.
+
+## Some things learned the hard way
+
+* `move.w` leaves the top half of a data register alone; an address
+  register as destination is always 32-bit and sets no flags.  One
+  `addq.w #6,A0` treated as a word cost five gates.
+* `asr` is arithmetic.  Implemented as a logical shift on an unsigned
+  value it drops every other bit, and the oracle diff looks like
+  `expected AND $55`.
+* A read-modify-write through `(An)+` adjusts the pointer once, not
+  twice.
+* Decode images must be coherent per memory region.  A stale chip-RAM
+  image still disassembles — into confident nonsense.
+* A routine can be byte-exact and still not be replaceable.  Charging a
+  fixed cycle cost for a routine whose real cost varies per course
+  (`car_update`: 970 cycles in FOREST, 768 in STORM) breaks the frames
+  it used to pass.
+
+## Layout
+
+```
+src/host/      chipset, WHDLoad shim, front ends
+src/recomp/    generated C + the runtime it runs on
+src/engine/    routines ported to native C
+src/viewer/    the RE pages
+tools/         recompiler, gates, capture and analysis
+re/            what the reverse engineering found
+third_party/   Musashi (oracle only)
+```
+
+## Legal
+
+The code here is mine.  The game is not.  The retail slave, `Disk.1` and
+everything extracted from them stay out of this repository; `.gitignore`
+enforces it.  Bring your own copy.

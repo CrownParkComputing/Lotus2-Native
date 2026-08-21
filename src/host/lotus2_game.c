@@ -64,6 +64,26 @@ static int ui_measure(const char *t, int size)
 #define AUDIO_RATE 44100
 #define FRAME_SAMPLES (AUDIO_RATE / 50)
 
+/* Fullscreen that actually fills the screen.  ToggleFullscreen() on its
+ * own keeps the windowed size as the video mode, so a 1600x900 window on
+ * a larger desktop goes fullscreen into a 1600x900 mode and everything
+ * outside it is lost off the edges.  Resize to the monitor first, and
+ * put the window back where it was on the way out. */
+static void go_fullscreen(int on, int win_w, int win_h)
+{
+    int mon = GetCurrentMonitor();
+    if (on && !IsWindowFullscreen()) {
+        SetWindowSize(GetMonitorWidth(mon), GetMonitorHeight(mon));
+        ToggleFullscreen();
+    } else if (!on && IsWindowFullscreen()) {
+        ToggleFullscreen();
+        SetWindowSize(win_w, win_h);
+        Vector2 mp = GetMonitorPosition(mon);
+        SetWindowPosition((int)mp.x + (GetMonitorWidth(mon) - win_w) / 2,
+                          (int)mp.y + (GetMonitorHeight(mon) - win_h) / 2);
+    }
+}
+
 int main(int argc, char **argv)
 {
     WhdConfig whd = { .dir = "original/Lotus2CD32",
@@ -112,7 +132,31 @@ int main(int argc, char **argv)
     /* no RESIZABLE: a tiling window manager takes that as licence to hand
      * out a 791x1294 portrait slot, and the 16:9 layout then lives in a
      * small box in the middle of it.  X or Y goes fullscreen. */
-    if (fullscreen) ToggleFullscreen();
+
+    /* Fit the monitor.  A fixed 1600x900 is larger than plenty of
+     * desktops once panels and decoration are taken off, and a window
+     * bigger than the screen has its right and bottom edges -- half the
+     * bezel -- hanging off it.  Shrink to fit the work area, keeping
+     * 16:9, then centre. */
+    {
+        int mon = GetCurrentMonitor();
+        int mw = GetMonitorWidth(mon), mh = GetMonitorHeight(mon);
+        if (mw > 320 && mh > 240) {
+            int aw = mw - 80, ah = mh - 120;
+            if (win_w > aw || win_h > ah) {
+                float k = (float)aw / win_w;
+                if ((float)ah / win_h < k) k = (float)ah / win_h;
+                win_w = (int)(win_w * k);
+                win_h = (int)(win_h * k);
+                SetWindowSize(win_w, win_h);
+            }
+            Vector2 mp = GetMonitorPosition(mon);
+            SetWindowPosition((int)mp.x + (mw - win_w) / 2,
+                              (int)mp.y + (mh - win_h) / 2);
+        }
+    }
+    int windowed_w = win_w, windowed_h = win_h;
+    if (fullscreen) go_fullscreen(1, windowed_w, windowed_h);
     SetTargetFPS(50);
     InitAudioDevice();
     /* One buffer per video frame.  raylib's default stream buffer is far
@@ -156,6 +200,20 @@ int main(int argc, char **argv)
     Image image = { .data = framebuf, .width = SCREEN_W, .height = SCREEN_H,
                     .mipmaps = 1, .format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8 };
     Texture2D screen = LoadTextureFromImage(image);
+    /* Two-stage scale.  Drawing a 320x200 screen straight into an
+     * arbitrary window at 4:3 is a non-integer scale, and nearest
+     * sampling turns that into unevenly sized pixels -- some rows and
+     * columns two host pixels wide, their neighbours three -- which is
+     * the blockiness.  Sampling smoothly instead just blurs it.
+     *
+     * So blow the screen up by an exact integer factor with nearest
+     * sampling, which keeps every guest pixel square and identical, and
+     * only then scale that to the window smoothly.  Edges stay where the
+     * game put them and the steps come out even. */
+    const int SHARP = 4;
+    RenderTexture2D sharp = LoadRenderTexture(SCREEN_W * SHARP,
+                                              SCREEN_H * SHARP);
+    SetTextureFilter(sharp.texture, TEXTURE_FILTER_BILINEAR);
     static int16_t mix[FRAME_SAMPLES * 2];
     int paused = 0;
     /* --wav writes the mixed stereo stream as raw s16le, so "is there
@@ -169,8 +227,10 @@ int main(int argc, char **argv)
 
     while (!WindowShouldClose() && !amiga_stopped()) {
         if (IsKeyPressed(KEY_P)) paused = !paused;
-        if (IsKeyPressed(KEY_F11) || IsKeyPressed(KEY_X) || IsKeyPressed(KEY_Y))
-            ToggleFullscreen();
+        if (IsKeyPressed(KEY_F11) || IsKeyPressed(KEY_X) ||
+            IsKeyPressed(KEY_Y) ||
+            IsGamepadButtonPressed(0, GAMEPAD_BUTTON_MIDDLE_RIGHT))
+            go_fullscreen(!IsWindowFullscreen(), windowed_w, windowed_h);
         if (IsKeyPressed(KEY_F2)) TakeScreenshot("lotus2.png");
 
         if (!paused) {
@@ -225,6 +285,14 @@ int main(int argc, char **argv)
             break;
         }
         UpdateTexture(screen, framebuf);
+        /* integer blow-up first (see SHARP above), outside BeginDrawing */
+        BeginTextureMode(sharp);
+        ClearBackground(BLACK);
+        DrawTexturePro(screen,
+                       (Rectangle){0, 0, SCREEN_W, SCREEN_H},
+                       (Rectangle){0, 0, SCREEN_W * SHARP, SCREEN_H * SHARP},
+                       (Vector2){0, 0}, 0.0f, WHITE);
+        EndTextureMode();
         BeginDrawing();
         ClearBackground(UI_GROUND);
         /* Lay the whole bezel out inside a 16:9 area centred in the
@@ -268,7 +336,14 @@ int main(int argc, char **argv)
         }
         Rectangle src = { border ? 0 : VIEW_X, border ? 0 : VIEW_Y, sw, sh };
         Rectangle dst = { ox + (w - gw) / 2, oy + (h - gh) / 2, gw, gh };
-        DrawTexturePro(screen, src, dst, (Vector2){0, 0}, 0.0f, WHITE);
+        DrawTexturePro(sharp.texture,
+                       /* the render texture holds its content upside
+                        * down, so the window into it is measured from
+                        * the bottom, not the top */
+                       (Rectangle){src.x * SHARP,
+                                   (SCREEN_H - src.y - sh) * SHARP,
+                                   sw * SHARP, -sh * SHARP}, dst,
+                       (Vector2){0, 0}, 0.0f, WHITE);
         DrawRectangleLinesEx((Rectangle){dst.x - 2, dst.y - 2, gw + 4, gh + 4},
                              2, UI_EDGE);
 
@@ -382,6 +457,26 @@ int main(int argc, char **argv)
             strstr(shot_path, ".png")) {
             EndDrawing();
             TakeScreenshot(shot_path);
+            /* Also dump the raw guest framebuffer at the SAME frame, so
+             * "is the front end mangling the picture?" can be answered by
+             * comparing two images from one run rather than two runs --
+             * boot is not frame-for-frame repeatable. */
+            {
+                char raw[512];
+                snprintf(raw, sizeof raw, "%.*s.ppm",
+                         (int)(strlen(shot_path) - 4), shot_path);
+                FILE *rf = fopen(raw, "wb");
+                if (rf) {
+                    fprintf(rf, "P6\n%d %d\n255\n", SCREEN_W, SCREEN_H);
+                    for (int i = 0; i < SCREEN_W * SCREEN_H; i++) {
+                        uint32_t px = framebuf[i];
+                        fputc(px & 0xff, rf);
+                        fputc((px >> 8) & 0xff, rf);
+                        fputc((px >> 16) & 0xff, rf);
+                    }
+                    fclose(rf);
+                }
+            }
             fprintf(stderr, "lotus2_game: wrote %s at frame %ld\n",
                     shot_path, swiv_frame_no);
             break;
