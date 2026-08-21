@@ -2364,121 +2364,65 @@ static void page_sound(void)
             16, WIN_H - BAR_H - 26, 18, LIGHTGRAY);
 }
 
-/* ---- typing the password, from where the game already is -------------
- * Picking a course used to reboot and replay the whole session from the
- * title: correct, and it made you watch the game start up again.  It
- * does not need to.  The password screen is two menu moves away from
- * where you already are, so the front end types it from HERE.
+/* ---- loading a course, rather than driving the menus -----------------
+ * The right question was "why not just load the level?", and the answer
+ * is that we can: `make course-snaps` already captures a full RAM image
+ * of a race in each of the eight, because the gates need them.  Loading
+ * one back is a save state -- chip RAM, the expansion RAM, the CPU's
+ * registers -- and it puts you in that course now, with no menus driven
+ * and nothing typed.
  *
- * The sequence and its gaps are the ones tools/course_session.py has
- * always used, minus the first fire -- that one is the press that left
- * the title, and by the time this runs it has happened:
- *
- *   up, up, up          GAME -> PASSWORD
- *   fire                open the field
- *   the letters         one every 40 frames
- *   RETURN              submit
- *   down, down, down    back to GAME
- *   fire                start
- *
- * FOREST has no password, so it is one fire and nothing else.
+ * What it cannot do is put you on the START LINE: the images are taken a
+ * few seconds into a race, because that is where a gate needs them.  A
+ * start-line set would be its own capture, at the frame the countdown
+ * ends.
  */
-static const char *const COURSE_PASSWORD[COURSE_COUNT] = {
-    NULL, "TWILIGHT", "PEA SOUP", "THE SKIDS", "PEACHES", "LIVER POOL",
-    "BAGLEY", "E BOW"
-};
-/* Amiga raw key codes, the same table course_session.py carries. */
-static int pw_raw(char c)
+static int sel_load_state(int course)
 {
-    static const char *L = "ABCDEFGHIJKLMNOPQRSTUVWXYZ ";
-    static const unsigned char R[] = {
-        0x20,0x35,0x33,0x22,0x12,0x23,0x24,0x25,0x17,0x26,0x27,0x28,0x37,
-        0x36,0x18,0x19,0x10,0x13,0x21,0x14,0x16,0x34,0x11,0x32,0x15,0x31,
-        0x40 };
-    for (int i = 0; L[i]; i++) if (L[i] == c) return R[i];
-    return -1;
-}
+    static const char *const NAMES[COURSE_COUNT] = {
+        "forest", "night", "fog", "snow", "desert", "motorway", "marsh",
+        "storm"
+    };
+    if (course < 0 || course >= COURSE_COUNT) return 0;
+    char fp[256], cp[256], rp[256];
+    snprintf(fp, sizeof fp, "re/pipeline/courses/%s_0_211e78_fast.bin",
+             NAMES[course]);
+    snprintf(cp, sizeof cp, "re/pipeline/courses/%s_0_211e78_chip.bin",
+             NAMES[course]);
+    snprintf(rp, sizeof rp, "re/pipeline/courses/%s_0_211e78.regs",
+             NAMES[course]);
 
-typedef struct { long at; uint8_t stick; int key; } PwStep;
-static PwStep pw_step[64];
-static int pw_count, pw_at;
-static long pw_clock;
-static int pw_running;
+    FILE *f = fopen(fp, "rb"), *c = fopen(cp, "rb"), *r = fopen(rp, "r");
+    if (!f || !c || !r) {
+        if (f) fclose(f);
+        if (c) fclose(c);
+        if (r) fclose(r);
+        fprintf(stderr, "no state for %s -- run make course-snaps\n",
+                NAMES[course]);
+        return 0;
+    }
+    /* the host's window is smaller than the dumped image; the game lives
+     * in the bottom of it */
+    fread(fast, 1, FAST_SIZE, f);
+    fread(chip, 1, CHIP_SIZE, c);
+    fclose(f);
+    fclose(c);
 
-static void pw_add(long at, uint8_t stick, int key)
-{
-    if (pw_count < 64) {
-        pw_step[pw_count].at = at;
-        pw_step[pw_count].stick = stick;
-        pw_step[pw_count].key = key;
-        pw_count++;
+    char name[32];
+    unsigned val;
+    while (fscanf(r, "%31s %x", name, &val) == 2) {
+        static const char *const D = "d0d1d2d3d4d5d6d7";
+        static const char *const A = "a0a1a2a3a4a5a6a7";
+        if (!strcmp(name, "pc")) cpu_set_reg(CPU_REG_PC, val);
+        else if (!strcmp(name, "sr")) cpu_set_reg(CPU_REG_SR, val);
+        else if (name[0] == 'd' && name[1] >= '0' && name[1] <= '7' && !name[2])
+            cpu_set_reg(CPU_REG_D0 + (name[1] - '0'), val), (void)D;
+        else if (name[0] == 'a' && name[1] >= '0' && name[1] <= '7' && !name[2])
+            cpu_set_reg(CPU_REG_A0 + (name[1] - '0'), val), (void)A;
     }
-}
-
-static void pw_begin(int course)
-{
-    pw_count = pw_at = 0;
-    pw_clock = 0;
-    const char *pass = (course >= 0 && course < COURSE_COUNT)
-                     ? COURSE_PASSWORD[course] : NULL;
-    if (!pass) {                       /* FOREST: just start */
-        pw_add(10, 0x10, -1);
-        pw_running = 1;
-        return;
-    }
-    pw_add(0,   0x01, -1);             /* up x3: GAME -> PASSWORD */
-    pw_add(60,  0x01, -1);
-    pw_add(120, 0x01, -1);
-    pw_add(200, 0x10, -1);             /* fire: open the field */
-    /* As fast as the handshake will take them.  The 40-frame gap in
-     * course_session.py is there because a RECORDING has to name a frame
-     * for each letter in advance; typing live can just wait for
-     * amiga_kbd_idle() and go, which turns eight seconds of watching a
-     * password appear into about one. */
-    long f = 260;
-    for (const char *c = pass; *c; c++) {
-        int raw = pw_raw(*c);
-        if (raw >= 0) pw_add(f, 0, raw);
-        f += 6;
-    }
-    long ret = f + 10;
-    pw_add(ret, 0, 0x44);              /* RETURN */
-    long d = ret + 90;
-    pw_add(d,       0x02, -1);         /* down x3: back to GAME */
-    pw_add(d + 60,  0x02, -1);
-    pw_add(d + 120, 0x02, -1);
-    pw_add(d + 200, 0x10, -1);         /* fire: start */
-    pw_add(d + 400, 0x10, -1);
-    pw_add(d + 600, 0x10, -1);
-    pw_running = 1;
-}
-
-/* One frame of it.  Returns the stick to feed the guest. */
-static uint8_t pw_frame(void)
-{
-    uint8_t stick = 0;
-    /* a press is held for a few frames, the way a person holds one */
-    for (int i = 0; i < pw_count; i++)
-        if (pw_clock >= pw_step[i].at && pw_clock < pw_step[i].at + 6)
-            stick |= pw_step[i].stick;
-    int stalled = 0;
-    while (pw_at < pw_count && pw_step[pw_at].at <= pw_clock) {
-        if (pw_step[pw_at].key >= 0) {
-            if (!amiga_kbd_idle()) { stalled = 1; break; }
-            amiga_key_event((uint8_t)pw_step[pw_at].key, false);
-        }
-        pw_at++;
-    }
-    /* Hold the whole schedule while a letter is waiting on the keyboard
-     * handshake.  Letting the clock run on would fire the RETURN, the
-     * menu moves and the start press against a password that is still
-     * being typed. */
-    if (!stalled) pw_clock++;
-    if (pw_at >= pw_count && pw_clock > pw_step[pw_count - 1].at + 30) {
-        pw_running = 0;
-        SetTargetFPS(50);
-    }
-    return stick;
+    fclose(r);
+    SetTargetFPS(50);
+    return 1;
 }
 
 /* ---- start any course, without typing a password ---------------------
@@ -2731,91 +2675,6 @@ static void draw_game_picture(Rectangle dst)
                    (Vector2){0, 0}, 0.0f, WHITE);
 }
 
-/* ---- the start menu --------------------------------------------------
- * Press fire on the title and the front end asks which course, rather
- * than the game asking for a password.  It only intercepts fire while no
- * race is up -- during a race fire is the accelerator and taking it
- * would be worse than not having the menu at all.
- */
-static int start_menu;
-static int start_sel;          /* the highlighted entry */
-
-/* Driven with the stick, because that is what is in your hand when the
- * game asks you to press fire.  The mouse still works; it is just not
- * required, which it was, which was the problem. */
-static void start_menu_input(uint8_t stick)
-{
-    const int n = COURSE_COUNT + 2;
-    static uint8_t was;
-    uint8_t went = (uint8_t)(stick & ~was);
-    was = stick;
-
-    if ((went & 0x01) || IsKeyPressed(KEY_UP))    start_sel--;
-    if ((went & 0x02) || IsKeyPressed(KEY_DOWN))  start_sel++;
-    if (start_sel < 0) start_sel = n - 1;
-    if (start_sel >= n) start_sel = 0;
-
-    if ((went & 0x10) || IsKeyPressed(KEY_SPACE) || IsKeyPressed(KEY_ENTER)) {
-        if (start_sel < COURSE_COUNT)      sel_request = start_sel + 1;
-        else if (start_sel == COURSE_COUNT) sel_request = -1;
-        else sel_request = 1 + (int)(wx_rand() * COURSE_COUNT) % COURSE_COUNT;
-        start_menu = 0;
-    }
-}
-
-/* Drawn to look like the game's own screens rather than like a tool:
- * the panel sits in the middle of the picture, black with a white rule
- * and a red heading, and the selected line is a solid red bar with the
- * text knocked out of it.  Those are the game's colours, taken from its
- * own palette ($a00 red, $ccc white, $000 black), so it sits inside the
- * picture instead of on top of it.
- */
-static void start_menu_draw(Rectangle game)
-{
-    if (!start_menu) return;
-    const int n = COURSE_COUNT + 2;
-    /* raylib already owns the names RED and WHITE, as it owned PINK and
-     * GOLD before them */
-    const Color MRED   = { 170, 0, 0, 255 };
-    const Color MWHITE = { 204, 204, 204, 255 };
-
-    float scale = game.height / 200.0f;      /* the game's own pixel size */
-    int lh = (int)(11 * scale);
-    int w  = (int)(150 * scale);
-    int h  = lh * (n + 2) + (int)(8 * scale);
-    int x0 = (int)(game.x + (game.width - w) / 2);
-    int y0 = (int)(game.y + (game.height - h) / 2);
-
-    DrawRectangle(x0, y0, w, h, (Color){0, 0, 0, 235});
-    DrawRectangleLinesEx((Rectangle){x0, y0, w, h}, (int)(2 * scale), MWHITE);
-
-    int fs = (int)(9 * scale);
-    if (fs < 10) fs = 10;
-    int tw = ui_measure("SELECT COURSE", fs);
-    ui_text("SELECT COURSE", x0 + (w - tw) / 2, y0 + (int)(6 * scale),
-            fs, MRED);
-
-    for (int i = 0; i < n; i++) {
-        const char *label = i < COURSE_COUNT ? COURSES[i].name
-                          : (i == COURSE_COUNT ? "ALL COURSES" : "SHUFFLE");
-        int y = y0 + (int)(6 * scale) + lh * (i + 2);
-        Rectangle line = {x0 + (int)(4 * scale), y - 1,
-                          w - (int)(8 * scale), lh};
-        if (ui_hit(line)) start_sel = i;
-        if (i == start_sel)
-            DrawRectangleRec(line, MRED);
-        int lw = ui_measure(label, fs);
-        ui_text(label, x0 + (w - lw) / 2, y, fs,
-                i == start_sel ? MWHITE : (Color){136, 136, 136, 255});
-        if (i == start_sel && ui_pressed()) {
-            if (i < COURSE_COUNT) sel_request = i + 1;
-            else if (i == COURSE_COUNT) sel_request = -1;
-            else sel_request = 1 + (int)(wx_rand() * COURSE_COUNT) % COURSE_COUNT;
-            start_menu = 0;
-        }
-    }
-}
-
 /* Set by page_game when the panel's DEBUG button is clicked. */
 static int game_debug_clicked;
 /* --bezel: the play front end's surround on the game page, so `make play`
@@ -2855,7 +2714,6 @@ static void page_game(void)
         if (racing_now) hud_speedo_numbers(bz.game);
         if (mapping) draw_race_map(mr);
         course_read_live = 0;
-        start_menu_draw(bz.game);
         return;
     }
     float s = (float)WIN_W / SCREEN_W;
@@ -3035,10 +2893,7 @@ int main(int argc, char **argv)
         /* --static freezes the game, so in shot mode only switch it on
          * once the run has reached the capture frame. */
         if (IsKeyPressed(KEY_P)) paused = !paused;
-        if (IsKeyPressed(KEY_ESCAPE)) {
-            if (start_menu) start_menu = 0;
-            else mode = MODE_GAME;
-        }
+        if (IsKeyPressed(KEY_ESCAPE)) mode = MODE_GAME;
         if (IsKeyPressed(KEY_F5)) { frozen = !frozen; freeze_on_course = false; }
         if (IsKeyPressed(KEY_F11)) ToggleFullscreen();
         if (IsKeyPressed(KEY_ONE))   mode = MODE_GAME;
@@ -3048,12 +2903,7 @@ int main(int argc, char **argv)
             sel_request = 0;
             sel_series = (want < 0);
             int course = sel_series ? 0 : want - 1;
-            /* From here, not from a reboot: the password screen is two
-             * menu moves away and watching the game start up again was
-             * the worst part of choosing a course. */
-            pw_begin(course);
-            SetTargetFPS(0);            /* the menus need not be watched */
-            mode = MODE_GAME;
+            if (sel_load_state(course)) mode = MODE_GAME;
         }
         /* the series: when a course's replay has handed over and the
          * next one is asked for, it starts from the top of the boot */
@@ -3133,17 +2983,6 @@ int main(int argc, char **argv)
              * controls has not left. */
             uint8_t p1 = 0, p2 = 0;
             static int p2_present;
-            if (pw_running) {
-                uint8_t b = pw_frame();
-                joy_state[0] = joy_state[1] = b;
-                amiga_run_frame();
-                {
-                    const int target = FRAME_SAMPLES * 4;
-                    int fill = amiga_audio_fill();
-                    if (fill < target) amiga_audio_generate(target - fill);
-                }
-                goto drawn;
-            }
             if (sel_running) {
                 uint8_t b = sel_frame();
                 joy_state[0] = joy_state[1] = b;
@@ -3157,28 +2996,6 @@ int main(int argc, char **argv)
             }
             if (mode == MODE_GAME) {
                 p1 = keyboard_stick(true) | gamepad_stick(0);
-                /* fire on the title asks which course; during a race it
-                 * is the accelerator and must go straight through */
-                static int fire_was;
-                int fire = (p1 & 0x10) != 0;
-                /* course_data_ready() goes through course_byte(), which
-                 * prefers the PREVIEW's snapshot when one is loaded --
-                 * so without this it always said "a race is up" and the
-                 * menu never appeared. */
-                int racing = race_on_screen();
-                /* The FIRST fire is the one that leaves the title, and
-                 * the menu belongs on the setup screen rather than in
-                 * front of it -- so that one goes through and the next
-                 * one asks. */
-                static int fires;
-                /* not in --shot mode: a capture must not be able to open
-                 * a menu and drive the game somewhere else */
-                if (!ui_input) fire = 0;
-                if (fire && !fire_was && !racing && ++fires > 1 && !start_menu)
-                    start_menu = 1;
-                if (racing) fires = 0;
-                fire_was = fire;
-                if (start_menu) { start_menu_input(p1); p1 = 0; }
                 p2 = keyboard_stick(false) | gamepad_stick(1);
                 if (p2 || js_present(1)) p2_present = 1;
             }
