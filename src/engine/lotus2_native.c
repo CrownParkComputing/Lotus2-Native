@@ -540,6 +540,57 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--coplist") && i + 1 < argc)
             coplist = strtol(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--verify-verbs")) verbs = true;
+        else if (!strcmp(argv[i], "--verify-blitq")) {
+            /* Does the native runner parse the queue the way the real
+             * drain did?  The record BOUNDARIES are the thing to check:
+             * get a field width wrong anywhere and every later record
+             * starts in the wrong place.  These addresses come from a
+             * per-instruction trace of a STORM frame, read off A5 each
+             * time the dispatcher at $21718a ran. */
+            static const uint32_t WANT[] = {
+                0x200052, 0x2000aa, 0x200102, 0x200158, 0x2001b0, 0x200206,
+                0x200244, 0x200282, 0x2002da, 0x200332, 0x200388, 0x2003e0,
+                0x200438, 0x20048e, 0x2004cc, 0x20050a, 0x200548, 0x200586,
+                0x2005dc, 0x200632, 0x20068a, 0x2006e0, 0x200736, 0x200754,
+                0x200792, 0x2007d0, 0x20080e, 0x20084c, 0x20088a, 0x2008c8,
+            };
+            const int nwant = (int)(sizeof WANT / sizeof WANT[0]);
+            Game g = {0};
+            size_t len = 0;
+            g.fast = guest_load("build/q/dr_1_212e7e_fast.bin",
+                                GUEST_FAST_SIZE, &len);
+            g.chip = guest_load("build/q/dr_1_212e7e_chip.bin",
+                                GUEST_CHIP_SIZE, &len);
+            if (!g.fast || !g.chip) {
+                fprintf(stderr, "blitq: no drain snapshot -- "
+                                "make storm-snaps\n");
+                return 1;
+            }
+            g.base = g.fast + (GUEST_BASE_ADDR - GUEST_FAST_ADDR);
+            Blitter bl = {0};
+            bl.chip = g.chip;
+            bl.chip_size = GUEST_CHIP_SIZE;
+            bl.bltafwm = bl.bltalwm = 0xffff;
+            static uint32_t got[256];
+            blitq_trace = got;
+            blitq_trace_n = 0;
+            int blits = blitq_run(&g, &bl, f32(&g, 0x208000u + 0x2f46));
+            blitq_trace = NULL;
+            int bad = 0;
+            for (int k = 0; k < nwant; k++) {
+                if (k >= blitq_trace_n || got[k] != WANT[k]) {
+                    if (bad < 4)
+                        fprintf(stderr, "  record %d: native $%06x "
+                                        "oracle $%06x\n", k,
+                                k < blitq_trace_n ? got[k] : 0, WANT[k]);
+                    bad++;
+                }
+            }
+            fprintf(stderr, "blitq: %d/%d record boundaries match, "
+                            "%d blits run%s\n",
+                    nwant - bad, nwant, blits, bad ? "  FAIL" : "");
+            return bad ? 1 : 0;
+        }
         else if (!strcmp(argv[i], "--verify-storm")) {
             /* The same road stages, gated against a STORM race instead
              * of a FOREST one.  A stage can be byte-exact on one course

@@ -148,6 +148,14 @@ static inline uint32_t m32(const Game *g, uint32_t addr)
                                   : g32(g->fast, addr - GUEST_FAST_ADDR);
 }
 
+/* ---- the blit queue ---- */
+/* Walk the records at `queue` and run every blit through `b`.  Returns
+ * how many blits were run.  See re/BLITQUEUE.md. */
+int blitq_run(Game *g, Blitter *b, uint32_t queue);
+int blitq_run_records(Game *g, Blitter *b, uint32_t queue);
+extern uint32_t *blitq_trace;   /* gate hook: record starts, or NULL */
+extern int blitq_trace_n;
+
 /* ---- weather (the courses other than FOREST) ---- */
 void     weather_span(Game *g, Regs *r);   /* $21495a */
 uint32_t weather_emit(Game *g, Regs *r);   /* $214994; returns A4 */

@@ -416,7 +416,7 @@ test: selftest boot-test
 clean:
 	rm -rf build
 
-.PHONY: play-min storm-snaps verify-storm course-snaps course-gate replay-gate override-check frame-gate debug coherence play no-musashi decode-check recomp recomp-gate statelog trace pcset drive all native boot-test selftest oracle test clean gate-capture road-capture render-gate view view-race track course
+.PHONY: play-min storm-snaps verify-storm verify-blitq course-snaps course-gate replay-gate override-check frame-gate debug coherence play no-musashi decode-check recomp recomp-gate statelog trace pcset drive all native boot-test selftest oracle test clean gate-capture road-capture render-gate view view-race track course
 
 # Per-course race snapshots for the viewer's ROAD VIEW.  Each is a real
 # race in that course, reached by replaying the password session that
@@ -434,6 +434,12 @@ storm-snaps: build/lotus2_recomp
 	./build/lotus2_recomp --dir $(INSTALL) \
 		--replay re/pipeline/courses/storm.rec \
 		--keys re/pipeline/courses/storm.keys --frames 6310 >/dev/null 2>&1
+	@mkdir -p build/q
+	@SWIV_SNAP_PCS=212e7e SWIV_SNAP_FROM=6300 SWIV_SNAP_MAX=2 \
+	SWIV_SNAP_PREFIX=build/q/dr_ \
+	./build/lotus2_recomp --dir $(INSTALL) \
+		--replay re/pipeline/courses/storm.rec \
+		--keys re/pipeline/courses/storm.keys --frames 6310 >/dev/null 2>&1
 	@for pcs in 2148c0,2148c4:ws_ 2148ca,2148ce:we_ 2159f2,2159f6:wp_; do \
 		p=$${pcs%%:*}; x=$${pcs##*:}; \
 		SWIV_SNAP_PCS=$$p SWIV_SNAP_FROM=6300 SWIV_SNAP_MAX=2 \
@@ -447,6 +453,16 @@ storm-snaps: build/lotus2_recomp
 
 verify-storm: build/lotus2_native
 	./build/lotus2_native --verify-storm
+
+# Does the native queue runner parse the real queue the way the real
+# drain did?  Needs the drain snapshot from make storm-snaps.
+verify-blitq: build/lotus2_native
+	./build/lotus2_native --verify-blitq
+
+# The record-type table is EXTRACTED from the handlers that read the
+# queue, because they are the only definition of its format.
+src/engine/blitq_types.h: tools/blitq_types.py build/dasm $(DECODE_IMAGE)
+	python3 tools/blitq_types.py > $@
 
 course-snaps: build/lotus2_recomp
 	mkdir -p re/pipeline/courses

@@ -600,6 +600,26 @@ static void roadplay_draw(float where)
                A3 - 0x4180, f16(&rp_g, A3 + 0x30e4), f16(&rp_g, A3 + 0x30ec),
                f16(&rp_g, A3 + 0x30dc), f32(&rp_g, A3 + 0x30d8), 0x2c);
 
+    /* The weather, for the courses that have any.  The ported pass
+     * ($215906 and below) does not draw -- it APPENDS records to the
+     * blit queue -- so the preview builds a queue of its own, runs the
+     * pass into it, and walks it through the engine's blitter.  The game
+     * spreads the same blits across a frame on blitter interrupts; there
+     * is nothing to spread here. */
+    if (f16(&rp_g, A3 + 0x2e02)) {
+        uint32_t shown = f32(&rp_g, A3 + 0x2f8a);
+        pf32(&rp_g, A3 + 0x2f8a, f32(&rp_g, A3 + 0x2f8e));
+        pf16(&rp_g, A3 + 0x2ebc, 0x60);       /* first stop of the machine */
+        Regs wr;
+        for (int i = 0; i < 8; i++) { wr.d[i] = 0; wr.a[i] = 0; }
+        wr.a[3] = A3;
+        wr.a[4] = 0x200004;                   /* a queue of our own */
+        weather_pass(&rp_g, &wr);
+        pf16(&rp_g, wr.a[4], 0);              /* the zero type ends it */
+        blitq_run_records(&rp_g, &rp_bl, 0x200004);
+        pf32(&rp_g, A3 + 0x2f8a, shown);
+    }
+
     /* Show it the way the machine would.  The racing screen's colours
      * are not one palette: the sky is a copper gradient, so decoding the
      * bitplanes against a flat 32-entry table gives a black sky and a
