@@ -998,6 +998,57 @@ static void render_road_frame(int segment)
     road_valid = 1;
 }
 
+/* ---- car colour ------------------------------------------------------
+ * The player's Esprit is drawn with two palette entries: $a00 for the
+ * body and $600 for its shaded side.  Sampling the indices under the car
+ * in a race frame says so -- 7 and 3, about 1100 pixels between them --
+ * and the palette confirms it.
+ *
+ * Recolouring is done on the finished picture rather than in the
+ * palette, for one reason: those two entries are used by the HUD as
+ * well, and repainting the speed bar because you wanted a green car
+ * would be a bug, not a feature.  Below the HUD band, the only red of
+ * those two shades on screen is the car.
+ *
+ * The opponents are a separate matter and the note at the bottom says
+ * what can and cannot be done about them.
+ */
+typedef struct { const char *name; uint8_t br, bg, bb, dr, dg, db; } CarHue;
+static const CarHue CAR_HUES[] = {
+    { "RED",    0xaa, 0x00, 0x00,  0x66, 0x00, 0x00 },   /* as shipped */
+    { "BLUE",   0x22, 0x44, 0xdd,  0x11, 0x22, 0x77 },
+    { "GREEN",  0x22, 0xaa, 0x33,  0x11, 0x55, 0x22 },
+    { "YELLOW", 0xee, 0xcc, 0x11,  0x99, 0x77, 0x00 },
+    { "ORANGE", 0xee, 0x77, 0x00,  0x88, 0x44, 0x00 },
+    { "PURPLE", 0x99, 0x33, 0xcc,  0x55, 0x11, 0x77 },
+    { "WHITE",  0xdd, 0xdd, 0xdd,  0x88, 0x88, 0x88 },
+    { "BLACK",  0x33, 0x33, 0x33,  0x11, 0x11, 0x11 },
+};
+#define CAR_HUE_COUNT ((int)(sizeof CAR_HUES / sizeof CAR_HUES[0]))
+static int car_hue;                 /* 0 = leave it alone */
+const char *car_hue_name(void) { return CAR_HUES[car_hue].name; }
+
+/* The two reds, in the host's pixel order (blue high, red low). */
+#define CAR_BRIGHT 0xff0000aau
+#define CAR_DARK   0xff000066u
+
+static void car_recolour(uint32_t *img, int w, int h, int from_y)
+{
+    if (!car_hue) return;
+    const CarHue *c = &CAR_HUES[car_hue];
+    uint32_t br = 0xff000000u | c->br | ((uint32_t)c->bg << 8)
+                | ((uint32_t)c->bb << 16);
+    uint32_t dk = 0xff000000u | c->dr | ((uint32_t)c->dg << 8)
+                | ((uint32_t)c->db << 16);
+    for (int y = from_y; y < h; y++) {
+        uint32_t *row = img + (size_t)y * w;
+        for (int x = 0; x < w; x++) {
+            if (row[x] == CAR_BRIGHT) row[x] = br;
+            else if (row[x] == CAR_DARK) row[x] = dk;
+        }
+    }
+}
+
 /* ---- markings and weather, drawn natively -----------------------------
  * The road's geometry is known exactly, MEASURED rather than derived:
  * printing each line's record beside the edges the 1x render produced
@@ -2252,6 +2303,9 @@ static void scale3x(const uint32_t *in, int inw, int x0, int y0,
 /* Draw the game window into `dst` at the chosen quality. */
 static void draw_game_picture(Rectangle dst)
 {
+    /* below the HUD band, so the speed bar keeps its own red */
+    car_recolour(framebuf, SCREEN_W, SCREEN_H, GAME_OY + 34);
+
     if (up_mode == UP_SCALE3X) {
         scale3x(framebuf, SCREEN_W, GAME_OX, GAME_OY, GAME_W, GAME_H, up_buf);
         if (!up_tex.id) {
@@ -2272,6 +2326,48 @@ static void draw_game_picture(Rectangle dst)
     DrawTexturePro(game_screen,
                    (Rectangle){GAME_OX, GAME_OY, GAME_W, GAME_H}, dst,
                    (Vector2){0, 0}, 0.0f, WHITE);
+}
+
+/* ---- the start menu --------------------------------------------------
+ * Press fire on the title and the front end asks which course, rather
+ * than the game asking for a password.  It only intercepts fire while no
+ * race is up -- during a race fire is the accelerator and taking it
+ * would be worse than not having the menu at all.
+ */
+static int start_menu;
+static Rectangle start_hit[COURSE_COUNT + 2];
+
+static void start_menu_draw(void)
+{
+    if (!start_menu) return;
+    const int n = COURSE_COUNT + 2;
+    const int bw = 260, bh = 44, pad = 10;
+    int rows = (n + 1) / 2;
+    int w = bw * 2 + pad * 3, h = rows * (bh + pad) + pad + 54;
+    int x0 = (WIN_W - w) / 2, y0 = (WIN_H - h) / 2;
+
+    DrawRectangle(0, 0, WIN_W, WIN_H, (Color){0, 0, 0, 170});
+    DrawRectangle(x0, y0, w, h, (Color){18, 18, 26, 255});
+    DrawRectangleLinesEx((Rectangle){x0, y0, w, h}, 2,
+                         (Color){0, 225, 255, 255});
+    ui_text("WHICH COURSE?", x0 + pad + 4, y0 + 12, 28, LABEL);
+
+    for (int i = 0; i < n; i++) {
+        Rectangle b = {x0 + pad + (i % 2) * (bw + pad),
+                       y0 + 54 + (i / 2) * (bh + pad), bw, bh};
+        start_hit[i] = b;
+        const char *label = i < COURSE_COUNT ? COURSES[i].name
+                          : (i == COURSE_COUNT ? "ALL, FROM THE START"
+                                               : "SHUFFLE");
+        if (button(b, label, 0)) {
+            if (i < COURSE_COUNT)            sel_request = i + 1;
+            else if (i == COURSE_COUNT)      sel_request = -1;
+            else                             sel_request =
+                1 + (int)(wx_rand() * COURSE_COUNT) % COURSE_COUNT;
+            start_menu = 0;
+        }
+    }
+    ui_text("ESC closes it", x0 + pad + 4, y0 + h - 26, 18, LIGHTGRAY);
 }
 
 /* Set by page_game when the panel's DEBUG button is clicked. */
@@ -2311,6 +2407,7 @@ static void page_game(void)
             game_debug_clicked = 1;
         if (mapping) draw_race_map(mr);
         course_read_live = 0;
+        start_menu_draw();
         return;
     }
     float s = (float)WIN_W / SCREEN_W;
@@ -2484,7 +2581,10 @@ int main(int argc, char **argv)
         /* --static freezes the game, so in shot mode only switch it on
          * once the run has reached the capture frame. */
         if (IsKeyPressed(KEY_P)) paused = !paused;
-        if (IsKeyPressed(KEY_ESCAPE)) mode = MODE_GAME;
+        if (IsKeyPressed(KEY_ESCAPE)) {
+            if (start_menu) start_menu = 0;
+            else mode = MODE_GAME;
+        }
         if (IsKeyPressed(KEY_F5)) { frozen = !frozen; freeze_on_course = false; }
         if (IsKeyPressed(KEY_F11)) ToggleFullscreen();
         if (IsKeyPressed(KEY_ONE))   mode = MODE_GAME;
@@ -2499,6 +2599,7 @@ int main(int argc, char **argv)
         /* the series: when a course's replay has handed over and the
          * next one is asked for, it starts from the top of the boot */
         if (IsKeyPressed(KEY_F4)) road_extras = !road_extras;
+        if (IsKeyPressed(KEY_F6)) car_hue = (car_hue + 1) % CAR_HUE_COUNT;
         if (IsKeyPressed(KEY_F3)) {
             up_mode = (up_mode + 1) % UP_COUNT;
             bezel_scaler = UP_NAME[up_mode];
@@ -2586,6 +2687,14 @@ int main(int argc, char **argv)
             }
             if (mode == MODE_GAME) {
                 p1 = keyboard_stick(true) | gamepad_stick(0);
+                /* fire on the title asks which course; during a race it
+                 * is the accelerator and must go straight through */
+                static int fire_was;
+                int fire = (p1 & 0x10) != 0;
+                if (fire && !fire_was && !start_menu && !course_data_ready())
+                    start_menu = 1;
+                fire_was = fire;
+                if (start_menu) p1 = 0;
                 p2 = keyboard_stick(false) | gamepad_stick(1);
                 if (p2 || js_present(1)) p2_present = 1;
             }

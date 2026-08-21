@@ -39,5 +39,6 @@ int bezel_panels(Bezel *b, int fps, int natives, int want_debug_btn,
 
 /* What the picture is being scaled with, for the panel legend. */
 extern const char *bezel_scaler;
+const char *car_hue_name(void);
 
 #endif

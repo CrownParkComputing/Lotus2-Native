@@ -21,6 +21,8 @@
 #include "pad.h"
 
 int native_overrides_count(void);
+/* the minimal front end has no car-colour picker; the panel still asks */
+const char *car_hue_name(void) { return "RED"; }
 
 static void audio_pull_cb(void *buffer, unsigned int frames)
 {

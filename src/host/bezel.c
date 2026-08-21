@@ -112,7 +112,7 @@ int bezel_panels(Bezel *b, int fps, int natives, int want_debug_btn,
         const int reserve = side ? right_reserve : 0;
         const int py = (int)p.y + reserve, ph = (int)p.height - reserve;
         Color hue = side ? P2HUE : P1HUE;
-        char fpsbuf[32], natbuf[40], scalebuf[48];
+        char fpsbuf[32], natbuf[40], scalebuf[48], carbuf[48];
         snprintf(fpsbuf, sizeof fpsbuf, "%d FPS", fps);
         snprintf(natbuf, sizeof natbuf, "%d ROUTINES NATIVE C", natives);
 
@@ -133,6 +133,9 @@ int bezel_panels(Bezel *b, int fps, int natives, int want_debug_btn,
             ROW("ARROWS   STEER", 0, BODYHUE);
             ROW("SPACE    ACCELERATE", 0, BODYHUE);
             ROW("SPACE    CHANGE GEAR", 0, BODYHUE);
+            snprintf(carbuf, sizeof carbuf, "F6       CAR: %s",
+                     car_hue_name());
+            ROW(carbuf, 0, hue);
         }
         ROW("", 0, BODYHUE);
         ROW(side ? "GAMEPAD 2" : "GAMEPAD 1", 0, HEADHUE);
