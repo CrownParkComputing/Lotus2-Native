@@ -998,6 +998,73 @@ static void render_road_frame(int segment)
     road_valid = 1;
 }
 
+/* ---- the speedometer -------------------------------------------------
+ * The game's speed readout is a bar that fills up: cheap to draw with a
+ * blitter and it tells you almost nothing.  The speed itself is a word
+ * in the car block at $3054(A3)+$e -- the same one the game divides down
+ * for its MPH digits -- so a real dial costs nothing but the drawing.
+ *
+ * The bar is painted out with the colour beside it rather than with
+ * black, because the HUD band has the sky behind it and a black rectangle
+ * would sit there like a hole.
+ */
+#define SPEEDO_X 2
+#define SPEEDO_Y 13
+#define SPEEDO_W 48
+#define SPEEDO_H 14
+
+static void hud_pixel(uint32_t *img, int x, int y, uint32_t c)
+{
+    if (x >= 0 && x < GAME_W && y >= 0 && y < GAME_H)
+        img[(GAME_OY + y) * SCREEN_W + GAME_OX + x] = c;
+}
+
+static void hud_speedo(uint32_t *img)
+{
+    if (!road_extras) return;
+    /* the game's own speed word, and its own idea of MPH: the digits
+     * read about a fortieth of it */
+    int word = (int16_t)r16(A3 + 0x3054 + 0x0e);
+    if (word < 0) word = 0;
+    float mph = word / 40.0f;
+    if (mph > 200.0f) mph = 200.0f;
+
+    uint32_t bg = img[(GAME_OY + SPEEDO_Y + 2) * SCREEN_W
+                      + GAME_OX + SPEEDO_X + SPEEDO_W + 6];
+    for (int y = SPEEDO_Y - 1; y < SPEEDO_Y + SPEEDO_H + 1; y++)
+        for (int x = SPEEDO_X - 1; x < SPEEDO_X + SPEEDO_W + 1; x++)
+            hud_pixel(img, x, y, bg);
+
+    const uint32_t white = 0xffccccccu, red = 0xff0000aau;
+    float cx = SPEEDO_X + SPEEDO_W * 0.5f;
+    float cy = SPEEDO_Y + SPEEDO_H - 1.0f;
+    float rad = SPEEDO_H - 2.0f;
+
+    /* the arc, with a tick every 40 mph and the last third in red */
+    for (int a = 0; a <= 180; a += 3) {
+        float t = a * 3.14159265f / 180.0f;
+        int x = (int)(cx - cosf(t) * rad);
+        int y = (int)(cy - sinf(t) * rad);
+        hud_pixel(img, x, y, a > 120 ? red : white);
+    }
+    for (int k = 0; k <= 5; k++) {
+        float t = (k / 5.0f) * 3.14159265f;
+        for (float r = rad - 3; r <= rad; r += 1.0f)
+            hud_pixel(img, (int)(cx - cosf(t) * r),
+                      (int)(cy - sinf(t) * r), white);
+    }
+    /* the needle */
+    float t = (mph / 200.0f) * 3.14159265f;
+    for (float r = 0; r < rad - 1.0f; r += 0.5f) {
+        int x = (int)(cx - cosf(t) * r), y = (int)(cy - sinf(t) * r);
+        hud_pixel(img, x, y, red);
+        hud_pixel(img, x, y - 1, red);
+    }
+    for (int dx = -1; dx <= 1; dx++)
+        for (int dy = -1; dy <= 1; dy++)
+            hud_pixel(img, (int)cx + dx, (int)cy + dy, white);
+}
+
 /* ---- the course intro ------------------------------------------------
  * The screen is a framed photograph on black, and the game zooms it up
  * as a transition -- which is where the picture-in-a-picture comes from:
@@ -2348,6 +2415,12 @@ static void draw_game_picture(Rectangle dst)
 {
     /* below the HUD band, so the speed bar keeps its own red */
     car_recolour(framebuf, SCREEN_W, SCREEN_H, GAME_OY + 34);
+    {   /* only while a race is up: there is no speed on a menu */
+        course_read_live = 1;
+        int racing = course_data_ready();
+        course_read_live = 0;
+        if (racing) hud_speedo(framebuf);
+    }
 
     Rectangle photo;
     if (road_extras && intro_photo(&photo)) {
