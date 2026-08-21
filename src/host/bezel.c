@@ -137,8 +137,8 @@ int bezel_panels(Bezel *b, int fps, int natives, int want_debug_btn,
         ROW("", 0, BODYHUE);
         ROW(side ? "GAMEPAD 2" : "GAMEPAD 1", 0, HEADHUE);
         ROW("D-PAD    STEER", 0, BODYHUE);
-        ROW("A / RB   ACCELERATE", 0, BODYHUE);
-        ROW("B / LB   CHANGE GEAR", 0, BODYHUE);
+        ROW("A / R1 / R2  ACCELERATE", 0, BODYHUE);
+        ROW("B / L1 / L2  CHANGE GEAR", 0, BODYHUE);
         ROW(side ? "second pad, port 0" : "first pad, port 1", 0, BODYHUE);
         ROW(side ? "JOYSTICK PORT 0" : "JOYSTICK PORT 1", 0, hue);
         ROW("", 0, BODYHUE);

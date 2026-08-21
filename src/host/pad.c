@@ -85,8 +85,14 @@ static uint8_t js_stick(int pad)
     if (y >  12000 || dy >  12000) state |= 0x02;
     if (x < -12000 || dx < -12000) state |= 0x04;
     if (x >  12000 || dx >  12000) state |= 0x08;
-    if (js_button[pad][0] || js_button[pad][5]) state |= 0x10;  /* A / RB */
-    if (js_button[pad][1] || js_button[pad][4]) state |= 0x20;  /* B / LB */
+    /* Triggers as well as buttons.  A resting trigger reads -32767 on
+     * some drivers and 0 on others, so anything past a quarter travel
+     * counts as pressed and both behave the same. */
+    int16_t lt = js_axis[pad][2], rt = js_axis[pad][5];
+    if (js_button[pad][0] || js_button[pad][5] || rt > 8000)
+        state |= 0x10;                          /* A / R1 / R2: accelerate */
+    if (js_button[pad][1] || js_button[pad][4] || lt > 8000)
+        state |= 0x20;                          /* B / L1 / L2: change gear */
     return state;
 }
 

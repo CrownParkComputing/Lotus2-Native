@@ -430,6 +430,11 @@ static void road_pc_hook(unsigned int pc)
     if (pc == road_capture_pc) road_grab();
 }
 
+/* Starting a course without typing its password: the page sets the
+ * request, the main loop acts on it where the WHDLoad config lives. */
+static int sel_request;      /* 1..8 = that course, -1 = the series */
+static int sel_series;
+
 /* Markings and weather, drawn natively over the composited frame. */
 static void road_markings(Game *g, uint32_t *img);
 static void weather_native(uint32_t *img, int kind, int count);
@@ -1404,7 +1409,9 @@ static void course_draw_map(Rectangle r)
     DrawRectangleLinesEx(r, 1, GRID);
 
     char z[64];
-    snprintf(z, sizeof z, "TOP DOWN   curves    zoom x%.0f", course_zoom);
+    snprintf(z, sizeof z, "TOP DOWN   %s    curves    zoom x%.0f",
+             course_name() ? course_name() : COURSES[course_sel].name,
+             course_zoom);
     ui_text(z, (int)r.x + 10, (int)r.y + 8, 22, LABEL);
     ui_text("orange right   blue left   green start   yellow here",
             (int)r.x + 10, (int)(r.y + r.height - 26), 18, LIGHTGRAY);
@@ -1461,7 +1468,8 @@ static void course_draw_profile(Rectangle r)
 
     DrawRectangleLinesEx(r, 1, GRID);
     char t[96];
-    snprintf(t, sizeof t, "SIDE ON   gradient    segments %d - %d",
+    snprintf(t, sizeof t, "SIDE ON   %s   gradient    segments %d - %d",
+             course_name() ? course_name() : COURSES[course_sel].name,
              from, to);
     ui_text(t, (int)r.x + 10, (int)r.y + 8, 22, LABEL);
     ui_text("green up   blue down", (int)(r.x + r.width - 220),
@@ -1579,6 +1587,21 @@ static void page_course(void)
     /* Always driving.  Scrubbing is how you choose WHERE on the course
      * to be; it should not also have to be how you make the road move,
      * so there is no separate DRIVE toggle any more. */
+    /* Race it, without going near the password screen. */
+    {
+        Rectangle rb = {WIN_W - 520, 112, 240, 30};
+        Rectangle sb = {WIN_W - 270, 112, 250, 30};
+        char lbl[64];
+        snprintf(lbl, sizeof lbl, "RACE %s", COURSES[course_sel].name);
+        if (button(rb, lbl, 0)) sel_request = course_sel + 1;
+        /* The series is what the game does on its own: finish a stage
+         * and it moves to the next.  So this is "start at the
+         * beginning", and the game handles the rest -- there is no
+         * sequencing here pretending to be a feature. */
+        if (button(sb, "RACE FROM THE START", sel_series))
+            sel_request = -1;
+    }
+
     float cy = 866, ch = 44;
     ui_text("SPEED", 20, (int)cy + 12, 20, LABEL);
     static const float SPEEDS[] = {SEG_PER_FRAME * 0.25f,
@@ -2012,6 +2035,118 @@ static void page_sound(void)
             16, WIN_H - BAR_H - 26, 18, LIGHTGRAY);
 }
 
+/* ---- start any course, without typing a password ---------------------
+ * Every course past the first is behind a password, and the front end
+ * knows all eight.  Rather than poke the game's state -- which skips
+ * whatever else its own setup does -- this REPLAYS the password: reboot,
+ * feed the recorded stick and the recorded keystrokes, and let go once
+ * the recording ends.  The game does its own work; it just does not need
+ * anyone at the keyboard.
+ *
+ * The wait is real but short.  Boot and the menus run uncapped, which is
+ * about ten seconds for the six thousand frames it takes to reach the
+ * start line, and the frame rate drops back to 50 the moment the
+ * recording hands over.
+ */
+typedef struct { long frame; unsigned code; } KeyEvent;
+static uint8_t *sel_rec;            /* one stick byte per frame */
+static long sel_rec_len, sel_rec_at;
+static KeyEvent sel_keys[256];
+static int sel_key_count, sel_key_at;
+static int sel_running;             /* replaying: the guest drives itself */
+static int sel_course = -1;
+
+static void sel_stop(void)
+{
+    free(sel_rec);
+    sel_rec = NULL;
+    sel_rec_len = sel_rec_at = 0;
+    sel_key_count = sel_key_at = 0;
+    sel_running = 0;
+}
+
+/* Load a course's recorded password session.  FOREST has no password and
+ * no recording: it is what the game starts on, so it only needs the
+ * menus driven, which the recording for any course also does. */
+static int sel_load(int course)
+{
+    static const char *const NAMES[COURSE_COUNT] = {
+        "forest", "night", "fog", "snow", "desert", "motorway", "marsh",
+        "storm"
+    };
+    if (course < 0 || course >= COURSE_COUNT) return 0;
+    sel_stop();
+    char path[256];
+    snprintf(path, sizeof path, "re/pipeline/courses/%s.rec", NAMES[course]);
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        /* FOREST: no password to type, so drive the menus with fire */
+        if (course != 0) return 0;
+        sel_rec_len = 3200;
+        sel_rec = calloc(1, sel_rec_len);
+        if (!sel_rec) return 0;
+        for (long i = 2100; i < sel_rec_len; i += 100)
+            for (long k = 0; k < 8 && i + k < sel_rec_len; k++)
+                sel_rec[i + k] = 0x10;
+        sel_course = course;
+        sel_running = 1;
+        return 1;
+    }
+    fseek(f, 0, SEEK_END);
+    sel_rec_len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    sel_rec = malloc(sel_rec_len ? sel_rec_len : 1);
+    if (sel_rec && sel_rec_len)
+        sel_rec_len = (long)fread(sel_rec, 1, sel_rec_len, f);
+    fclose(f);
+
+    snprintf(path, sizeof path, "re/pipeline/courses/%s.keys", NAMES[course]);
+    f = fopen(path, "r");
+    if (f) {
+        long fr; unsigned code;
+        while (sel_key_count < 256 && fscanf(f, "%ld %x", &fr, &code) == 2) {
+            sel_keys[sel_key_count].frame = fr;
+            sel_keys[sel_key_count].code = code;
+            sel_key_count++;
+        }
+        fclose(f);
+    }
+    sel_course = course;
+    sel_running = 1;
+    return sel_rec != NULL;
+}
+
+/* Reboot and start replaying.  Returns 0 if the recording is missing. */
+static int sel_start(int course, WhdConfig *whd)
+{
+    if (!sel_load(course)) return 0;
+    amiga_init();
+    if (!whdload_boot(whd)) { sel_stop(); return 0; }
+    amiga_enable_video(true);
+    sel_rec_at = 0;
+    sel_key_at = 0;
+    SetTargetFPS(0);                /* the menus do not need to be watched */
+    return 1;
+}
+
+/* One frame of the replay.  Returns the stick to feed the guest, and
+ * clears `sel_running` when the recording runs out. */
+static uint8_t sel_frame(void)
+{
+    if (sel_key_at < sel_key_count &&
+        sel_keys[sel_key_at].frame <= sel_rec_at && amiga_kbd_idle()) {
+        amiga_key_event((uint8_t)sel_keys[sel_key_at].code, false);
+        sel_key_at++;
+    }
+    uint8_t b = (sel_rec_at < sel_rec_len) ? sel_rec[sel_rec_at] : 0;
+    sel_rec_at++;
+    if (sel_rec_at >= sel_rec_len) {
+        sel_running = 0;
+        SetTargetFPS(50);           /* over to the player */
+    }
+    return b;
+}
+
 /* ---- in-game course map ---------------------------------------------
  * The same integrated centreline the preview page draws, in the corner
  * of the player 2 panel while a race is on, with the car where the
@@ -2250,7 +2385,17 @@ int main(int argc, char **argv)
     }
 
     SetTraceLogLevel(LOG_WARNING);
+    /* Resizable is safe now.  It was off because a tiling window manager
+     * took it as licence to hand out a portrait slot, and the layout of
+     * the day could not cope; everything is drawn into a fixed logical
+     * canvas and blitted scaled and centred, so any window shape works
+     * and the bezel keeps its 16:9 inside whatever it is given. */
+    /* ...except in --shot mode, where the window manager choosing the
+     * size makes the captures non-deterministic, which is the one thing
+     * a capture must not be. */
+    if (shot_at < 0) SetConfigFlags(FLAG_WINDOW_RESIZABLE);
     InitWindow(WIN_W, WIN_H, "Lotus 2 - native RE viewer");
+    SetWindowMinSize(800, 450);
     SetExitKey(KEY_NULL);
     /* The logical canvas is 1920x1080 and gets blitted scaled to fit, but
      * the WINDOW opened at that size regardless -- so on any desktop
@@ -2344,6 +2489,15 @@ int main(int argc, char **argv)
         if (IsKeyPressed(KEY_F11)) ToggleFullscreen();
         if (IsKeyPressed(KEY_ONE))   mode = MODE_GAME;
         if (IsKeyPressed(KEY_TWO))   mode = MODE_COURSE;
+        if (sel_request) {
+            int want = sel_request;
+            sel_request = 0;
+            sel_series = (want < 0);
+            int course = sel_series ? 0 : want - 1;
+            if (sel_start(course, &whd)) mode = MODE_GAME;
+        }
+        /* the series: when a course's replay has handed over and the
+         * next one is asked for, it starts from the top of the boot */
         if (IsKeyPressed(KEY_F4)) road_extras = !road_extras;
         if (IsKeyPressed(KEY_F3)) {
             up_mode = (up_mode + 1) % UP_COUNT;
@@ -2419,6 +2573,17 @@ int main(int argc, char **argv)
              * controls has not left. */
             uint8_t p1 = 0, p2 = 0;
             static int p2_present;
+            if (sel_running) {
+                uint8_t b = sel_frame();
+                joy_state[0] = joy_state[1] = b;
+                amiga_run_frame();
+                {
+                    const int target = FRAME_SAMPLES * 4;
+                    int fill = amiga_audio_fill();
+                    if (fill < target) amiga_audio_generate(target - fill);
+                }
+                goto drawn;
+            }
             if (mode == MODE_GAME) {
                 p1 = keyboard_stick(true) | gamepad_stick(0);
                 p2 = keyboard_stick(false) | gamepad_stick(1);
@@ -2431,12 +2596,14 @@ int main(int argc, char **argv)
                     : 0x10;
             joy_state[1] = stick;                     /* near car */
             joy_state[0] = p2_present ? p2 : stick;   /* far car, or menus */
+            (void)0;
             amiga_run_frame();
             {   /* keep ~80 ms of slack in the ring for the callback */
                 const int target = FRAME_SAMPLES * 4;
                 int fill = amiga_audio_fill();
                 if (fill < target) amiga_audio_generate(target - fill);
             }
+        drawn: ;
             /* The course landing used to freeze the emulation here.  It
              * is a debug convenience, not a default: F5 freezes when you
              * want to read state, and the game keeps running otherwise. */
