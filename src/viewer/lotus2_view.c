@@ -435,6 +435,7 @@ static int rp_ready;            /* a snapshot is loaded */
  * would otherwise stay on screen as a stripe of leftover hill. */
 static uint8_t *rp_clean;
 static uint32_t rp_clean_at;
+static int rp_clean_horizon = -1;   /* $30e4 in the captured frame */
 static int rp_course = -1;      /* which COURSES[] entry it holds */
 static char rp_note[96];
 
@@ -480,11 +481,15 @@ static void roadplay_load(int course)
         memcpy(rp_clean, rp_g.chip + rp_clean_at,
                (size_t)RACE_PLANES * RACE_PLANE_STRIDE);
     else { free(rp_clean); rp_clean = NULL; }
+    rp_clean_horizon = (int16_t)f16(&rp_g, A3 + 0x30e4);
+    if (rp_clean_horizon < 0) rp_clean_horizon = 0;
+    if (rp_clean_horizon > VIEW_H) rp_clean_horizon = VIEW_H;
     rp_ready = 1;
     rp_course = course;
     snprintf(rp_note, sizeof rp_note,
              "the game's own road chain in native C  "
-             "(road only: the object passes are not ported)");
+             "(the road is drawn live; the skyline is the captured "
+             "frame's, moved to the horizon)");
 }
 
 static const uint8_t *course_snapshot_table(void)
@@ -503,9 +508,6 @@ static void roadplay_draw(float where)
     if (!rp_ready) return;
     if (where < 0) where = 0;
     if (where > COURSE_SEGMENTS - 1) where = COURSE_SEGMENTS - 1;
-    if (rp_clean)
-        memcpy(rp_g.chip + rp_clean_at, rp_clean,
-               (size_t)RACE_PLANES * RACE_PLANE_STRIDE);
     pf32(&rp_g, A3 + 0x30d8, (uint32_t)(where * 65536.0f));
     /* No steering.  $30dc is the steering word the perspective pass
      * picks its variant from -- zero runs the plain, centred pass, while
@@ -520,31 +522,48 @@ static void roadplay_draw(float where)
     road_sky(&rp_g);
     road_keyframes_near(&rp_g);
 
-    /* Blank the ground, from the horizon down.  The snapshot's buffer
-     * still holds the frame it was captured on, and the road chain
-     * redraws only part of it, so the car, the HUD and the near trees
-     * were showing through as frozen pixels.  Clearing everything is
-     * wrong the other way: the sky is drawn as bands INTO the bitplanes,
-     * not painted by the copper, so a fully cleared bitmap has a black
-     * sky.  The horizon line the keyframe generator just published
-     * ($30e4) is exactly the boundary between the two. */
+    /* Rebuild the picture around the horizon the generator has just
+     * published.
+     *
+     * The sky is not painted by the copper -- clearing all four planes
+     * leaves it black -- it is drawn as bands INTO the bitplanes by a
+     * pass that is not ported.  All the preview has is the sky from the
+     * frame the snapshot was captured on, drawn for THAT frame's
+     * horizon.  Leaving it alone is what made a hill stay on screen:
+     * seek somewhere with a lower horizon and the snapshot's own road,
+     * which sat above its horizon, was still there.
+     *
+     * So the sky is SHIFTED to meet the new horizon, the way it moves in
+     * the game, and everything below the horizon is cleared for the road
+     * chain to draw into.
+     */
     {
         uint32_t buf = (f32(&rp_g, A3 + 0x2f8e) + 2) & ~1u;
-        int top = (int16_t)f16(&rp_g, A3 + 0x30e4);
-        if (top < 0) top = 0;
-        if (top > VIEW_H) top = VIEW_H;
-        for (int p = 0; p < RACE_PLANES; p++) {
-            uint32_t plane = buf + (uint32_t)p * RACE_PLANE_STRIDE;
-            uint32_t at = plane + (uint32_t)top * RACE_ROW_STRIDE;
-            size_t span = (size_t)(VIEW_H - top) * RACE_ROW_STRIDE;
-            if (at >= 0x400 && at + span <= GUEST_CHIP_SIZE)
-                memset(rp_g.chip + at, 0, span);
-            /* and the HUD band, which is above the horizon and would
-             * otherwise sit over the preview showing a frozen speed,
-             * position and score */
-            size_t hud = (size_t)ROAD_CROP * RACE_ROW_STRIDE;
-            if (plane >= 0x400 && plane + hud <= GUEST_CHIP_SIZE)
-                memset(rp_g.chip + plane, 0, hud);
+        int cur = (int16_t)f16(&rp_g, A3 + 0x30e4);
+        if (cur < ROAD_CROP) cur = ROAD_CROP;
+        if (cur > VIEW_H) cur = VIEW_H;
+        int shift = cur - rp_clean_horizon;
+
+        if (rp_clean && buf == rp_clean_at) {
+            for (int p = 0; p < RACE_PLANES; p++) {
+                uint8_t *dst = rp_g.chip + buf + (size_t)p * RACE_PLANE_STRIDE;
+                const uint8_t *src = rp_clean + (size_t)p * RACE_PLANE_STRIDE;
+                /* sky, aligned to the new horizon; rows that fall off
+                 * the top of the captured sky repeat its topmost row */
+                for (int y = ROAD_CROP; y < cur; y++) {
+                    int sy = y - shift;
+                    if (sy < ROAD_CROP) sy = ROAD_CROP;
+                    if (sy > rp_clean_horizon - 1) sy = rp_clean_horizon - 1;
+                    if (sy < 0) sy = 0;
+                    memcpy(dst + (size_t)y * RACE_ROW_STRIDE,
+                           src + (size_t)sy * RACE_ROW_STRIDE,
+                           RACE_ROW_STRIDE);
+                }
+                /* the HUD band, and the ground the road is drawn onto */
+                memset(dst, 0, (size_t)ROAD_CROP * RACE_ROW_STRIDE);
+                memset(dst + (size_t)cur * RACE_ROW_STRIDE, 0,
+                       (size_t)(VIEW_H - cur) * RACE_ROW_STRIDE);
+            }
         }
     }
 
@@ -1399,7 +1418,10 @@ int main(int argc, char **argv)
          * -- there was no way back. */
         int want_debug = game_debug_clicked;
         game_debug_clicked = 0;
-        if (mode == MODE_GAME && (IsKeyPressed(KEY_D) || want_debug))
+        if (mode == MODE_GAME &&
+            (IsKeyPressed(KEY_X) || IsKeyPressed(KEY_D) || want_debug ||
+             (IsGamepadAvailable(0) &&
+              IsGamepadButtonPressed(0, GAMEPAD_BUTTON_RIGHT_FACE_LEFT))))
             mode = MODE_COURSE;
         /* Pad navigation, so the debug pages are reachable without
          * reaching for the keyboard.  The face and shoulder buttons are

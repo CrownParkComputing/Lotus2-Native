@@ -138,8 +138,8 @@ int bezel_panels(Bezel *b, int fps, int natives, int want_debug_btn,
         ROW("", 0, BODYHUE);
         if (side) {
             ROW("KEYS", 0, HEADHUE);
-            ROW("X / Y    FULLSCREEN", 0, BODYHUE);
-            ROW("D        DEBUG PAGES", 0, BODYHUE);
+            ROW("X        COURSE PREVIEW", 0, hue);
+            ROW("F11      FULLSCREEN", 0, BODYHUE);
             ROW("P        PAUSE", 0, BODYHUE);
             ROW("F2       SCREENSHOT", 0, BODYHUE);
             ROW("ESC      QUIT", 0, BODYHUE);
@@ -190,12 +190,12 @@ int bezel_panels(Bezel *b, int fps, int natives, int want_debug_btn,
             DrawRectangleRec(btn, hot ? (Color){40, 70, 90, 255}
                                       : (Color){24, 30, 40, 255});
             DrawRectangleLinesEx(btn, 2, P1HUE);
-            int bs = 20, tw = bezel_measure("DEBUG PAGES", bs);
+            int bs = 20, tw = bezel_measure("COURSE PREVIEW  (X)", bs);
             while (tw > btn.width - 10 && bs > 9) {
                 bs -= 2;
-                tw = bezel_measure("DEBUG PAGES", bs);
+                tw = bezel_measure("COURSE PREVIEW  (X)", bs);
             }
-            bezel_text("DEBUG PAGES", (int)(btn.x + (btn.width - tw) / 2),
+            bezel_text("COURSE PREVIEW  (X)", (int)(btn.x + (btn.width - tw) / 2),
                        (int)(btn.y + (btn.height - bs) / 2), bs, P1HUE);
             if (hot && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) clicked = 1;
         }
