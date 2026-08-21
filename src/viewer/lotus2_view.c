@@ -611,9 +611,16 @@ static void roadplay_draw(float where)
      * whose BPL1PT points at the buffer we just drew into rather than
      * assuming an address. */
     uint32_t drawn = f32(&rp_g, A3 + 0x2f8e);
-    static const uint32_t COPLISTS[] = {0x7f5f0, 0x7ed0c, 0x7fedc};
+    /* FOUR copper lists, not three.  $2f60 picks which of three sky
+     * regions the sky pass writes into -- $7f6d8, $7e510, $7edf4 -- and
+     * each of those sits inside its own list: $7f5f0, $7e428, $7ed0c,
+     * with $7fedc the fourth.  SNOW and MARSH run with $2f60 = 1, whose
+     * list at $7e428 was missing here, so no list matched the buffer and
+     * the view fell back to decoding against a flat palette: a purple
+     * road on a black ground. */
+    static const uint32_t COPLISTS[] = {0x7f5f0, 0x7ed0c, 0x7e428, 0x7fedc};
     uint32_t use = 0;
-    for (int k = 0; k < 3 && !use; k++) {
+    for (int k = 0; k < 4 && !use; k++) {
         uint32_t hi = 0, lo = 0, at = COPLISTS[k];
         for (int i = 0; i < 2048; i++, at += 4) {
             uint16_t reg = g16(rp_g.chip, at), dat = g16(rp_g.chip, at + 2);
