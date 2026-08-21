@@ -354,6 +354,8 @@ static float course_rendered_at = -1;
 /* The HUD (speed bar, position, score, countdown) occupies the top 34
  * rows of the race screen. */
 #define ROAD_TOP 34
+/* the position and lap digits hang below the HUD band proper */
+#define ROAD_CROP (ROAD_TOP + 24)
 #define RACE_PLANE_STRIDE 0x20d0
 #define RACE_ROW_STRIDE   42
 #define RACE_PLANES       4
@@ -415,6 +417,12 @@ static void road_pc_hook(unsigned int pc)
 static Game rp_g;
 static Blitter rp_bl;
 static int rp_ready;            /* a snapshot is loaded */
+/* The snapshot's own race bitmap, untouched.  Every draw starts from
+ * this, because the clear below is bounded by the CURRENT horizon: over
+ * a crest the horizon rises, and last frame's road above the new horizon
+ * would otherwise stay on screen as a stripe of leftover hill. */
+static uint8_t *rp_clean;
+static uint32_t rp_clean_at;
 static int rp_course = -1;      /* which COURSES[] entry it holds */
 static char rp_note[96];
 
@@ -451,6 +459,15 @@ static void roadplay_load(int course)
     rp_bl.chip = rp_g.chip;
     rp_bl.chip_size = GUEST_CHIP_SIZE;
     rp_bl.bltafwm = rp_bl.bltalwm = 0xffff;
+    free(rp_clean);
+    rp_clean_at = (f32(&rp_g, A3 + 0x2f8e) + 2) & ~1u;
+    rp_clean = malloc((size_t)RACE_PLANES * RACE_PLANE_STRIDE);
+    if (rp_clean && rp_clean_at >= 0x400 &&
+        rp_clean_at + (size_t)RACE_PLANES * RACE_PLANE_STRIDE
+            <= GUEST_CHIP_SIZE)
+        memcpy(rp_clean, rp_g.chip + rp_clean_at,
+               (size_t)RACE_PLANES * RACE_PLANE_STRIDE);
+    else { free(rp_clean); rp_clean = NULL; }
     rp_ready = 1;
     rp_course = course;
     snprintf(rp_note, sizeof rp_note,
@@ -470,7 +487,19 @@ static void roadplay_draw(int seg)
     if (!rp_ready) return;
     if (seg < 0) seg = 0;
     if (seg > COURSE_SEGMENTS - 1) seg = COURSE_SEGMENTS - 1;
+    if (rp_clean)
+        memcpy(rp_g.chip + rp_clean_at, rp_clean,
+               (size_t)RACE_PLANES * RACE_PLANE_STRIDE);
     pf32(&rp_g, A3 + 0x30d8, (uint32_t)seg << 16);
+    /* No steering.  $30dc is the steering word the perspective pass
+     * picks its variant from -- zero runs the plain, centred pass, while
+     * anything else leans the road the way the car was being steered.
+     * The snapshot carries whatever the driver was doing at the moment
+     * it was taken, which after a seek to another part of the course
+     * means nothing at all: it drew the road running off the side of the
+     * screen and stopping halfway down.  A preview has no driver, so the
+     * camera sits square on the road. */
+    pf16(&rp_g, A3 + 0x30dc, 0);
 
     road_sky(&rp_g);
     road_keyframes_near(&rp_g);
@@ -497,9 +526,7 @@ static void roadplay_draw(int seg)
             /* and the HUD band, which is above the horizon and would
              * otherwise sit over the preview showing a frozen speed,
              * position and score */
-            /* 34 rows is the HUD's own band, but the position and
-             * lap digits hang below it, so the preview clears further */
-            size_t hud = (size_t)(ROAD_TOP + 24) * RACE_ROW_STRIDE;
+            size_t hud = (size_t)ROAD_CROP * RACE_ROW_STRIDE;
             if (plane >= 0x400 && plane + hud <= GUEST_CHIP_SIZE)
                 memset(rp_g.chip + plane, 0, hud);
         }
@@ -847,8 +874,12 @@ static void course_draw_3d(Rectangle r)
              rp_ready ? rp_note : "preview drawn from the decoded track table");
     ui_text(t, (int)r.x + 8, (int)r.y + 5, 20, LABEL);
 
+    /* Show the road, not the space where the HUD was.  The HUD band is
+     * blanked before the chain runs, and leaving it in put a black bar a
+     * third of the panel deep above the picture, which reads as the road
+     * sitting low and off centre. */
     Rectangle inner = {r.x, r.y + CAP, r.width, r.height - CAP};
-    int road_h = GAME_H;
+    int road_h = GAME_H - ROAD_CROP;
     float sc = inner.width / (float)GAME_W;
     float sy = inner.height / (float)road_h;
     if (sy < sc) sc = sy;
@@ -856,8 +887,9 @@ static void course_draw_3d(Rectangle r)
                      inner.y + (inner.height - road_h * sc) * 0.5f,
                      GAME_W * sc, road_h * sc};
     UpdateTexture(road_tex, road_img);
-    DrawTexturePro(road_tex, (Rectangle){0, 0, GAME_W, GAME_H}, dst,
-                   (Vector2){0, 0}, 0.0f, WHITE);
+    DrawTexturePro(road_tex,
+                   (Rectangle){0, ROAD_CROP, GAME_W, GAME_H - ROAD_CROP},
+                   dst, (Vector2){0, 0}, 0.0f, WHITE);
     DrawRectangleLinesEx(r, 1, GRID);
 }
 
@@ -1360,7 +1392,11 @@ int main(int argc, char **argv)
             UnloadImage(s);
         }
 
-        if (!offline && !paused && !frozen) {
+        /* The guest runs only while the game page is up.  Leaving it
+         * running behind a debug page meant walking away from the
+         * keyboard on the COURSE page and coming back to a race in
+         * progress -- the attract sequence does not need input. */
+        if (!offline && !paused && !frozen && mode == MODE_GAME) {
             js_poll();
             /* Only the game page steers the game.  The debug pages use
              * the same arrows, stick and buttons to scrub and zoom, and
@@ -1393,9 +1429,12 @@ int main(int argc, char **argv)
         UpdateTexture(screen, framebuf);
 
         /* --- draw the logical canvas --- */
+        /* The pages get the whole window.  Squeezing one into the gap
+         * between the bezel panels shrank every control to fit a third
+         * of the width; the bezel is the GAME's surround, not a frame to
+         * hang tools inside. */
         BeginTextureMode(canvas_rt);
         ClearBackground(BAR_BG);
-
         switch (mode) {
         case MODE_COURSE:  page_course(); break;
         default:           page_game(); break;
