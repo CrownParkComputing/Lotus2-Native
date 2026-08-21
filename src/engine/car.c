@@ -70,10 +70,14 @@ void car_update(Game *g, uint32_t a4)
             if ((int16_t)f16(g, a4 + 0xb2) < 0) {
                 if ((int16_t)f16(g, A3 + 0x2fa0) < 0x32) to_release = 1;
                 else {
-                    /* $20d7e8 allocates a voice and returns it in D0;
-                     * with audio unmodelled there is no voice to take, so
-                     * leave the field as the caller left it. */
-                    to_claim = 0;
+                    /* $212a74: moveq #$6c,D0; bsr $20d7e8; move.w D0,($b2,A4).
+                     * This used to be skipped -- "with audio unmodelled
+                     * there is no voice to take" -- which quietly stopped
+                     * the engine note ever claiming a channel.  $20d7e8
+                     * runs on every course and throughout a real race, so
+                     * that gap was not theoretical; it is also what made
+                     * car_update ineligible to run native at all. */
+                    pf16(g, a4 + 0xb2, w(sfx_claim_voice(g, 0x6c)));
                 }
             }
             if (to_claim) {                     /* $212a7e */
@@ -806,4 +810,54 @@ void car_checkpoint_regs(Game *g, Regs *r)
     }
 
     r->d[0] = d0; r->d[1] = d1; r->d[7] = d7; r->a[0] = a0;
+}
+
+/* ---- $20d7e8: claim a sound voice ----
+ *
+ * Four channel slots at $2ca2(A3), tried in three passes: a slot marked
+ * free ($fffe), then one whose value has run past its limit at +$10,
+ * then one whose priority at +$18 is below the caller's.  The chosen
+ * slot gets the priority, a busy marker and the caller's sound id, and
+ * the slot index comes back in D0.  With none available D7 reaches 8 and
+ * D0 comes back as 4 -- one past the last channel.
+ *
+ * Its only register effect is D0: the movem at the top saves D1, D2, D7,
+ * A0 and A1 and the tail restores them, and the disabled path at $2f56
+ * returns without touching anything at all.
+ *
+ * This is what blocked car_update and car_tick from running native.  Both
+ * call it -- car_tick by way of car_drive at $212762 -- and it runs on
+ * every course and throughout a real race, so a port that skipped it
+ * would have quietly stopped allocating engine and effect voices.
+ */
+uint32_t sfx_claim_voice(Game *g, uint32_t d0)
+{
+    if (f16(g, A3 + 0x2f56) != 0) return d0;        /* disabled */
+
+    const uint32_t a1 = f32(g, A3 + 0x2438
+                            + (uint32_t)(int32_t)(int16_t)(w(d0) << 2));
+    /* the entry is a CHIP pointer, so this read must dispatch on range */
+    const uint16_t d2 = m16(g, a1 + 0x0c);          /* our priority */
+    const uint32_t a0 = A3 + 0x2ca2;
+    uint16_t d7;
+    int found = 0;
+
+    for (d7 = 0; d7 < 8; d7 += 2)                   /* a free slot */
+        if (f16(g, a0 + d7) == 0xfffe) { found = 1; break; }
+    if (!found)
+        for (d7 = 0; d7 < 8; d7 += 2)               /* one past its limit */
+            if ((int16_t)(f16(g, a0 + d7) - f16(g, a0 + 0x10 + d7)) >= 0)
+                { found = 1; break; }
+    if (!found)
+        for (d7 = 0; d7 < 8; d7 += 2)               /* one we outrank */
+            if ((int16_t)(d2 - f16(g, a0 + 0x18 + d7)) > 0)
+                { found = 1; break; }
+    if (!found) d7 = 8;                             /* none: D0 becomes 4 */
+
+    if (found) {
+        pf16(g, a0 + 0x18 + d7, d2);
+        pf16(g, a0 + d7, 0xffff);
+        pf16(g, a0 + 0x20 + d7, w(d0));
+    }
+    return setw(d0, (uint16_t)(d7 >> 1));           /* move.w D7,D0; lsr.w #1 */
 }

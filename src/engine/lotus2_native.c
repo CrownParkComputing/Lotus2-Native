@@ -341,6 +341,11 @@ static void stage_input_read(Game *g) { input_read(g, &stage_input); }
 
 /* $211e78: the car model, run on the near view block */
 static void stage_car(Game *g) { car_update(g, A3_BASE + 0x3054); }
+/* $20d7e8 via the engine-note call site at $212a76.  Its only register
+ * effect is D0; everything else is saved and restored by its movem. */
+static void stage_claim_voice(Game *g)
+{ stage_expect(0, sfx_claim_voice(g, stage_d[0])); }
+
 static void stage_checkpoint(Game *g)
 {
     Regs r;
@@ -513,6 +518,10 @@ int main(int argc, char **argv)
                                "re/pipeline/road/ph_0_211e78_fast.bin",
                                "re/pipeline/road/ph_1_211e7c_fast.bin",
                                stage_car);
+            rc |= verify_stage("sfx_claim_voice ($20d7e8)",
+                               "re/pipeline/road/vx_0_212a76_fast.bin",
+                               "re/pipeline/road/vx_1_212a7a_fast.bin",
+                               stage_claim_voice);
             rc |= verify_stage("car_checkpoint",
                                "re/pipeline/road/ph_1_211e7c_fast.bin",
                                "re/pipeline/road/ph_2_211e80_fast.bin",

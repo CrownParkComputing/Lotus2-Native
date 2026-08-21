@@ -211,10 +211,6 @@ uint32_t scen_shape_ptr(Game *g, uint32_t a1, uint32_t d6)
  * The shape pointers are chip addresses while the tables are ExpMem, so
  * this is the first ported routine that has to read from both.
  */
-static uint16_t m16(const Game *g, uint32_t a)
-{ return a < GUEST_CHIP_SIZE ? g16(g->chip, a) : f16(g, a); }
-static uint32_t m32(const Game *g, uint32_t a)
-{ return a < GUEST_CHIP_SIZE ? g32(g->chip, a) : f32(g, a); }
 static uint8_t m8(const Game *g, uint32_t a)
 { return a < GUEST_CHIP_SIZE ? g->chip[a] : g->fast[a - GUEST_FAST_ADDR]; }
 

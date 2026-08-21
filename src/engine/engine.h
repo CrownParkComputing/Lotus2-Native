@@ -126,6 +126,20 @@ static inline uint16_t w(uint32_t r) { return (uint16_t)r; }
 static inline uint32_t setw(uint32_t r, uint16_t v)
 { return (r & 0xffff0000u) | v; }
 
+/* Range-aware guest read: the sound tables hold CHIP pointers, and a
+ * fast-only accessor underflows on those.  Used where a pointer's origin
+ * is not known statically. */
+static inline uint16_t m16(const Game *g, uint32_t addr)
+{
+    return addr < GUEST_CHIP_SIZE ? g16(g->chip, addr)
+                                  : g16(g->fast, addr - GUEST_FAST_ADDR);
+}
+static inline uint32_t m32(const Game *g, uint32_t addr)
+{
+    return addr < GUEST_CHIP_SIZE ? g32(g->chip, addr)
+                                  : g32(g->fast, addr - GUEST_FAST_ADDR);
+}
+
 /* ---- car model ---- */
 void car_update(Game *g, uint32_t view);       /* $2129f2 */
 void car_checkpoint(Game *g, uint32_t view);   /* $212680 */
@@ -134,6 +148,7 @@ void car_distance(Game *g, uint32_t view, uint32_t *regs); /* $212662; D0,D1 */
 void car_shape(Game *g, uint32_t view);        /* $212ba4 */
 void car_shape_regs(Game *g, Regs *r);         /* $212ba4, registers too */
 void car_checkpoint_regs(Game *g, Regs *r);    /* $212680, registers too */
+uint32_t sfx_claim_voice(Game *g, uint32_t d0); /* $20d7e8; returns D0 */
 void car_drive(Game *g, uint32_t view);        /* $212734 */
 void car_tick(Game *g, uint32_t view);         /* $21270a */
 uint32_t car_frame_latch(Game *g);             /* $211dd4; returns A1 */
