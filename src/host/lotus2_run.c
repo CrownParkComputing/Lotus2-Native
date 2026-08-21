@@ -143,8 +143,14 @@ int main(int argc, char **argv)
     };
     long frames = 600;
     long video_from = 0;
-    const char *replay_path = NULL;
+    const char *replay_path = NULL, *keys_path = NULL;
     FILE *replay = NULL;
+    /* The password screen is typed, not steered: the stick moves the
+     * cursor onto the field but cannot change a letter.  Reaching courses
+     * 2-8 therefore needs key events, so a replay can carry them --
+     * "frame rawcode" per line, Amiga raw key codes. */
+    struct { long frame; unsigned code; } keys[256];
+    int key_count = 0, key_at = 0;
     long fire_from = -1, fire_period = 0;
     long expect_disk_loads = 0, expect_blits = 0;
     const char *ppm = NULL, *ppm_seq = NULL;
@@ -162,6 +168,8 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--no-video")) video_from = -1;
         else if (!strcmp(argv[i], "--replay") && i + 1 < argc)
             replay_path = argv[++i];
+        else if (!strcmp(argv[i], "--keys") && i + 1 < argc)
+            keys_path = argv[++i];
         else if (!strcmp(argv[i], "--fire-from") && i + 1 < argc)
             fire_from = number(argv[++i]);
         else if (!strcmp(argv[i], "--fire-period") && i + 1 < argc)
@@ -233,12 +241,40 @@ int main(int argc, char **argv)
         if (!replay) { perror(replay_path); return 1; }
         fprintf(stderr, "lotus2: replaying input from %s\n", replay_path);
     }
+    if (keys_path) {
+        FILE *kf = fopen(keys_path, "r");
+        if (!kf) { perror(keys_path); return 1; }
+        long fr; unsigned code;
+        while (key_count < 256 && fscanf(kf, "%ld %x", &fr, &code) == 2) {
+            keys[key_count].frame = fr;
+            keys[key_count].code = code;
+            key_count++;
+        }
+        fclose(kf);
+        fprintf(stderr, "lotus2: %d key events from %s\n", key_count, keys_path);
+    }
     amiga_enable_video(video_from == 0);
 
     long last_loads = -1;
     while (swiv_frame_no < frames && !amiga_stopped()) {
         if (video_from > 0 && swiv_frame_no == video_from)
             amiga_enable_video(true);
+        /* Press and release are separate frames.  Sending both in one
+         * frame leaves the game's "last rawkey" slot ($2fcc) holding the
+         * RELEASE code, and only the first letter of a password ever
+         * appears. */
+        static long key_up_at = -1;
+        static unsigned key_up_code = 0;
+        /* Press only, paced by the keyboard actually being ready.  The
+         * game acts on key-down codes; feeding the matching release
+         * leaves the handshake un-acknowledged and the queue jams after
+         * one letter. */
+        (void)key_up_at; (void)key_up_code;
+        if (key_at < key_count && keys[key_at].frame <= swiv_frame_no &&
+            amiga_kbd_idle()) {
+            amiga_key_event((uint8_t)keys[key_at].code, false);
+            key_at++;
+        }
         if (replay) {
             /* one recorded byte per frame; past the end, hands off */
             int b = fgetc(replay);
@@ -278,6 +314,13 @@ int main(int argc, char **argv)
 
     swiv_recomp_trace_flush();
     if (ptrlog) fclose(ptrlog);
+    {
+        extern long swiv_keys_delivered, swiv_keys_blocked;
+        if (swiv_keys_delivered || swiv_keys_blocked)
+            fprintf(stderr, "keyboard: %ld delivered, %ld frames blocked "
+                    "waiting for the game's handshake\n",
+                    swiv_keys_delivered, swiv_keys_blocked);
+    }
     amiga_report();
     whdload_report();
     int status = 0;

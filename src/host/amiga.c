@@ -1196,9 +1196,20 @@ void amiga_key_event(uint8_t rawcode, bool up)
     kbd_tail = next;
 }
 
+long swiv_keys_delivered, swiv_keys_blocked;
+
+/* True when the keyboard is ready for another code: nothing queued and
+ * the game has acknowledged the last one.  An injector that ignores this
+ * and types on a fixed schedule loses every letter after the first. */
+bool amiga_kbd_idle(void)
+{
+    return !kbd_pending && kbd_head == kbd_tail;
+}
 static void kbd_pump(void)
 {
-    if (kbd_pending || kbd_head == kbd_tail) return;
+    if (kbd_head == kbd_tail) return;
+    if (kbd_pending) { swiv_keys_blocked++; return; }
+    swiv_keys_delivered++;
     uint8_t code = kbd_queue[kbd_head];
     kbd_head = (kbd_head + 1) % (int)sizeof kbd_queue;
     uint8_t inverted = (uint8_t)~code;
