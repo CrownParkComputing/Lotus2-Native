@@ -95,32 +95,41 @@ build/lotus2_native: src/engine/lotus2_native.c $(ENGINE) $(ENGINE_H)
 # data lands and defaults to a debug map page, so it was never a way to
 # play.  This is the game screen, the pad and the sound, nothing else.
 build/lotus2_game: src/host/lotus2_game.c $(HOST) $(HOST_H) \
-		src/host/pad.c src/host/cpu_recomp.c src/recomp/m68krt.h \
+		src/host/pad.c src/host/bezel.c src/host/bezel.h \
+		src/host/cpu_recomp.c src/recomp/m68krt.h \
 		$(NATIVE_OVR) $(ENGINE_H) build/lotus2_recomp.o
 	mkdir -p build
 	$(CC) $(CFLAGS_RECOMP) -Isrc/engine -o $@ src/host/lotus2_game.c \
-		$(HOST) src/host/pad.c src/host/cpu_recomp.c $(NATIVE_OVR) \
-		build/lotus2_recomp.o $(RAYLIB_FLAGS)
+		$(HOST) src/host/pad.c src/host/bezel.c src/host/cpu_recomp.c \
+		$(NATIVE_OVR) build/lotus2_recomp.o $(RAYLIB_FLAGS)
 
 RECORD ?=
-play: build/lotus2_game
+# PLAY is the viewer with the bezel on: same front end, same sound, and
+# the RE pages a button away instead of a different program.
+play: build/lotus2_play
+	./build/lotus2_play --live --bezel --dir $(INSTALL)
+
+# The bare front end, without the RE pages.  Still the one the captures
+# and the shot-based checks use.
+play-min: build/lotus2_game
 	./build/lotus2_game --dir $(INSTALL) \
 		$(if $(RECORD),--record $(RECORD))
 
 # Play with the debug pages one keypress away: 1 GAME, 2 COURSE,
 # 3 TRACK, 4 GEOM, 5 DISPLAY; F5 freezes the emulation to read state.
 debug: build/lotus2_play
-	./build/lotus2_play --live --dir $(INSTALL)
+	./build/lotus2_play --live --bezel --dir $(INSTALL)
 
 # The debug viewer driven by recompiled C (map/track/geometry pages).
 build/lotus2_play: src/viewer/lotus2_view.c $(HOST) $(HOST_H) \
-		src/host/pad.c src/host/cpu_recomp.c src/recomp/m68krt.h \
+		src/host/pad.c src/host/bezel.c src/host/bezel.h \
+		src/host/cpu_recomp.c src/recomp/m68krt.h \
 		$(NATIVE_OVR) $(ENGINE_H) build/lotus2_recomp.o
 	mkdir -p build
 	$(CC) $(CFLAGS_RECOMP) -Isrc/engine -o $@ \
 		src/viewer/lotus2_view.c $(HOST) src/host/pad.c \
-		src/host/cpu_recomp.c $(NATIVE_OVR) build/lotus2_recomp.o \
-		$(RAYLIB_FLAGS)
+		src/host/bezel.c src/host/cpu_recomp.c $(NATIVE_OVR) \
+		build/lotus2_recomp.o $(RAYLIB_FLAGS)
 
 # Live viewer: runs the game through the oracle host in a window, with the
 # TRACK / GEOMETRY / DISPLAY debug panels over the live guest state.
@@ -405,7 +414,7 @@ test: selftest boot-test
 clean:
 	rm -rf build
 
-.PHONY: course-snaps course-gate replay-gate override-check frame-gate debug coherence play no-musashi decode-check recomp recomp-gate statelog trace pcset drive all native boot-test selftest oracle test clean gate-capture road-capture render-gate view view-race track course
+.PHONY: play-min course-snaps course-gate replay-gate override-check frame-gate debug coherence play no-musashi decode-check recomp recomp-gate statelog trace pcset drive all native boot-test selftest oracle test clean gate-capture road-capture render-gate view view-race track course
 
 # Per-course race snapshots for the viewer's ROAD VIEW.  Each is a real
 # race in that course, reached by replaying the password session that

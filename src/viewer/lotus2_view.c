@@ -25,6 +25,20 @@
 #include "whdload.h"
 #include "pad.h"
 #include "cpu.h"
+#include "bezel.h"
+
+/* Sound, on the same pull model as the play front end: the device asks
+ * for exactly the samples it needs and the video loop only keeps the
+ * ring stocked.  Pushing a buffer per video frame starves the device --
+ * 49.75 fps against 44100 samples a second is short every frame -- and a
+ * starved stream repeats its last buffer, which is audible as an echo on
+ * whichever voice is loudest. */
+#define AUDIO_RATE 44100
+#define FRAME_SAMPLES (AUDIO_RATE / 50)
+static void audio_pull_cb(void *buffer, unsigned int frames)
+{
+    amiga_audio_pull((int16_t *)buffer, (int)frames);
+}
 #include "engine.h"
 #include "compositor.h"
 
@@ -1256,8 +1270,35 @@ static void page_display(void)
 /* The game, scaled to fit, with a one-line status strip.  Everything the
  * debug pages show is still a keypress away; this is just the thing you
  * actually play. */
+/* Set by page_game when the panel's DEBUG button is clicked. */
+static int game_debug_clicked;
+/* --bezel: the play front end's surround on the game page, so `make play`
+ * and `make debug` are the same window and the debug pages are a button
+ * away rather than a different program. */
+static int use_bezel;
+int native_overrides_count(void);
+
 static void page_game(void)
 {
+    game_debug_clicked = 0;
+    if (use_bezel) {
+        /* The bezel is laid out in the logical canvas, and the mouse has
+         * to be mapped into it too or the button is only clickable where
+         * it is drawn on a 1:1 window. */
+        Bezel bz = bezel_begin(4.0f, 3.0f,
+                               (Rectangle){0, 0, WIN_W, WIN_H - BAR_H});
+        Rectangle src = { GAME_OX, GAME_OY, GAME_W, GAME_H };
+        DrawTexturePro(game_screen, src, bz.game, (Vector2){0, 0}, 0.0f,
+                       WHITE);
+        DrawRectangleLinesEx((Rectangle){bz.game.x - 2, bz.game.y - 2,
+                                         bz.game.width + 4,
+                                         bz.game.height + 4},
+                             2, BTN_EDGE);
+        game_debug_clicked = bezel_panels(&bz, GetFPS(),
+                                          native_overrides_count(), 1,
+                                          mpos());
+        return;
+    }
     float s = (float)WIN_W / SCREEN_W;
     if ((float)(WIN_H - 26) / SCREEN_H < s) s = (float)(WIN_H - 26) / SCREEN_H;
     Rectangle src = { 0, 0, SCREEN_W, SCREEN_H };
@@ -1292,6 +1333,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--course") && i + 1 < argc)
             course_path = argv[++i];
         else if (!strcmp(argv[i], "--live")) course_path = NULL;
+        else if (!strcmp(argv[i], "--bezel")) use_bezel = 1;
         else if (!strcmp(argv[i], "--level") && i + 1 < argc) {
             const char *w = argv[++i];
             for (int k = 0; k < COURSE_COUNT; k++)
@@ -1347,7 +1389,10 @@ int main(int argc, char **argv)
     }
     /* Run flat out while booting into a race; the tool only needs 50 Hz
      * once the course is loaded and the emulation is frozen. */
-    SetTargetFPS(0);
+    /* Flat out while booting into a race, which is what the debug pages
+     * want.  As the play front end it has to run at the machine's rate
+     * instead, or the game is simply too fast to drive. */
+    SetTargetFPS(use_bezel ? 50 : 0);
     canvas_rt = LoadRenderTexture(WIN_W, WIN_H);
     ui_font = GetFontDefault();
     static const char *fonts[] = {
@@ -1362,6 +1407,15 @@ int main(int argc, char **argv)
         }
 
     int offline = course_path && course_load(course_path);
+    AudioStream stream = {0};
+    if (!offline) {
+        InitAudioDevice();
+        SetAudioStreamBufferSizeDefault(FRAME_SAMPLES);
+        stream = LoadAudioStream(AUDIO_RATE, 16, 2);
+        SetAudioStreamCallback(stream, audio_pull_cb);
+        PlayAudioStream(stream);
+        amiga_audio_generate(FRAME_SAMPLES * 4);   /* prime the ring */
+    }
     if (!offline) {
         amiga_init();
         if (!whdload_boot(&whd)) {
@@ -1399,6 +1453,9 @@ int main(int argc, char **argv)
         if (IsKeyPressed(KEY_THREE)) mode = MODE_TRACK;
         if (IsKeyPressed(KEY_FOUR))  mode = MODE_GEOM;
         if (IsKeyPressed(KEY_FIVE))  mode = MODE_DISPLAY;
+        /* D from the play screen, or the panel's DEBUG button */
+        if (mode == MODE_GAME && (IsKeyPressed(KEY_D) || game_debug_clicked))
+            mode = MODE_COURSE;
         /* Pad navigation, so the debug pages are reachable without
          * reaching for the keyboard.  The face and shoulder buttons are
          * already taken by the pages themselves (scrub, jump, drive,
@@ -1426,7 +1483,11 @@ int main(int argc, char **argv)
                     : 0x10;
             joy_state[0] = joy_state[1] = stick;
             amiga_run_frame();
-            amiga_audio_frame();
+            {   /* keep ~80 ms of slack in the ring for the callback */
+                const int target = FRAME_SAMPLES * 4;
+                int fill = amiga_audio_fill();
+                if (fill < target) amiga_audio_generate(target - fill);
+            }
             /* The course landing used to freeze the emulation here.  It
              * is a debug convenience, not a default: F5 freezes when you
              * want to read state, and the game keeps running otherwise. */
@@ -1514,6 +1575,10 @@ int main(int argc, char **argv)
         }
     }
 
+    if (stream.buffer) {
+        UnloadAudioStream(stream);
+        CloseAudioDevice();
+    }
     UnloadTexture(screen);
     UnloadTexture(road_tex);
     UnloadRenderTexture(canvas_rt);

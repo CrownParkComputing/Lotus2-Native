@@ -16,6 +16,7 @@
 #include "raylib.h"
 #include "amiga.h"
 #include "cpu.h"
+#include "bezel.h"
 #include "whdload.h"
 #include "pad.h"
 
@@ -295,162 +296,39 @@ int main(int argc, char **argv)
         EndTextureMode();
         BeginDrawing();
         ClearBackground(UI_GROUND);
-        /* Lay the whole bezel out inside a 16:9 area centred in the
-         * window.  On a 5120x1440 ultrawide -- or under a tiling WM that
-         * hands out a 1404x306 slot -- stretching to the window shape
-         * either pillarboxes absurdly or clips the panels off the bottom.
-         * Pinning to 16:9 keeps the framing the same everywhere. */
-        int winw = GetScreenWidth(), winh = GetScreenHeight();
-        int w = winw, h = winh, ox = 0, oy = 0;
+        Bezel bz;
+        Rectangle src, dst;
         if (bezel) {
-            if (winw * 9 > winh * 16) { h = winh; w = h * 16 / 9; }
-            else { w = winw; h = w * 9 / 16; }
-            ox = (winw - w) / 2;
-            oy = (winh - h) / 2;
-        }
-        float sw = border ? SCREEN_W : VIEW_W;
-        float sh = border ? SCREEN_H : VIEW_H;
-
-        /* The game is 4:3; the window is 16:9.  Fill the height with the
-         * game and give the leftover width to the two panels. */
-        float s = (float)h / sh;
-        float gw = sw * s * (4.0f / 3.0f) / (sw / sh) / (4.0f / 3.0f);
-        gw = sw * s;
-        float gh;
-        if (bezel) {
-            /* Fill the height, and show the game at 4:3.  A 320x200 lores
-             * Amiga screen is not square-pixel -- it was drawn for a 4:3
-             * television -- so scaling it 1:1 stretches everything thin.
-             * Whatever width is left over goes to the two panels, down to
-             * a floor that keeps the legends readable. */
-            gh = h - 24.0f;
-            gw = gh * 4.0f / 3.0f;
-            const float min_panel = 150.0f;
-            if (gw > w - min_panel * 2) {
-                gw = w - min_panel * 2;
-                gh = gw * 3.0f / 4.0f;
-            }
+            /* 320x200 lores is a 4:3 picture, not a square-pixel one */
+            bz = bezel_begin(4.0f, 3.0f,
+                             (Rectangle){0, 0, (float)GetScreenWidth(),
+                                         (float)GetScreenHeight()});
+            dst = bz.game;
+            src = (Rectangle){VIEW_X, VIEW_Y, VIEW_W, VIEW_H};
         } else {
-            gh = sh * s;
-            if (gw > w) { s = (float)w / sw; gw = w; }
+            float sw = border ? SCREEN_W : VIEW_W;
+            float sh = border ? SCREEN_H : VIEW_H;
+            int winw = GetScreenWidth(), winh = GetScreenHeight();
+            float s = (float)winh / sh;
+            if (sw * s > winw) s = (float)winw / sw;
+            src = (Rectangle){border ? 0 : VIEW_X, border ? 0 : VIEW_Y, sw, sh};
+            dst = (Rectangle){(winw - sw * s) / 2, (winh - sh * s) / 2,
+                              sw * s, sh * s};
         }
-        Rectangle src = { border ? 0 : VIEW_X, border ? 0 : VIEW_Y, sw, sh };
-        Rectangle dst = { ox + (w - gw) / 2, oy + (h - gh) / 2, gw, gh };
         DrawTexturePro(sharp.texture,
                        /* the render texture holds its content upside
                         * down, so the window into it is measured from
                         * the bottom, not the top */
                        (Rectangle){src.x * SHARP,
-                                   (SCREEN_H - src.y - sh) * SHARP,
-                                   sw * SHARP, -sh * SHARP}, dst,
-                       (Vector2){0, 0}, 0.0f, WHITE);
-        DrawRectangleLinesEx((Rectangle){dst.x - 2, dst.y - 2, gw + 4, gh + 4},
+                                   (SCREEN_H - src.y - src.height) * SHARP,
+                                   src.width * SHARP, -src.height * SHARP},
+                       dst, (Vector2){0, 0}, 0.0f, WHITE);
+        DrawRectangleLinesEx((Rectangle){dst.x - 2, dst.y - 2,
+                                         dst.width + 4, dst.height + 4},
                              2, UI_EDGE);
-
-        if (bezel) {
-            /* Layout copied from ~/Uridium2-Native so the Retro Recomp
-             * front ends look alike: two narrow symmetric side panels
-             * with neon edges -- cyan for player 1, pink for player 2 --
-             * the game between them, and raylib's own pixel font rather
-             * than a smooth one, which is what that project uses. */
-            const Color P1HUE = { 0, 225, 255, 255 };
-            const Color P2HUE = { 255, 70, 165, 255 };
-            const Color HEADHUE = { 255, 190, 70, 255 };
-            const Color BODYHUE = { 196, 200, 212, 255 };
-            const int lpx = ox + 10, lpw = (int)dst.x - lpx - 12;
-            const int rpx = (int)(dst.x + gw) + 12, rpw = ox + w - rpx - 10;
-            const int py = oy + 10, ph = h - 20;
-            /* type scales with the panel, so nothing runs off the edge */
-            const int fs = lpw / 15 < 10 ? 10 : (lpw / 15 > 20 ? 20 : lpw / 15);
-            const int fb = fs * 2;               /* PLAYER n heading */
-            const int ls = fs + 4;               /* line spacing */
-
-            DrawRectangleLinesEx((Rectangle){lpx, py, lpw, ph}, 2, P1HUE);
-            DrawRectangleLinesEx((Rectangle){rpx, py, rpw, ph}, 2, P2HUE);
-
-            /* Build each panel as a list, then pick a type size that
-             * fits BOTH the widest line and the total height.  Fixed
-             * sizes clipped the right panel and ran the left one's foot
-             * into its body, because the window manager decides the
-             * window size, not us. */
-            for (int side = 0; side < 2; side++) {
-                const int px = side ? rpx : lpx, pw = side ? rpw : lpw;
-                Color hue = side ? P2HUE : P1HUE;
-                char fpsbuf[32], natbuf[32];
-                snprintf(fpsbuf, sizeof fpsbuf, "%d FPS", GetFPS());
-                snprintf(natbuf, sizeof natbuf, "%d ROUTINES NATIVE C",
-                         native_overrides_count());
-
-                struct { const char *t; int head; Color c; } rows[24];
-                int n = 0;
-                #define ROW(T, H, C) do { if (n < 24) { rows[n].t = (T); \
-                    rows[n].head = (H); rows[n].c = (C); n++; } } while (0)
-                ROW("LOTUS TURBO CHALLENGE 2", 0, hue);
-                ROW("NATIVE PROJECT", 0, BODYHUE);
-                ROW("", 0, BODYHUE);
-                ROW(side ? "PLAYER 2" : "PLAYER 1", 1, hue);
-                ROW("KEYBOARD", 0, HEADHUE);
-                if (side) {
-                    ROW("not wired up yet", 0, BODYHUE);
-                } else {
-                    ROW("ARROWS   STEER", 0, BODYHUE);
-                    ROW("SPACE    ACCELERATE", 0, BODYHUE);
-                    ROW("SPACE    CHANGE GEAR", 0, BODYHUE);
-                }
-                ROW("", 0, BODYHUE);
-                ROW(side ? "GAMEPAD 2" : "GAMEPAD 1", 0, HEADHUE);
-                ROW("D-PAD    STEER", 0, BODYHUE);
-                ROW("A / RB   ACCELERATE", 0, BODYHUE);
-                ROW("B / LB   CHANGE GEAR", 0, BODYHUE);
-                ROW(side ? "JOYSTICK PORT 0" : "JOYSTICK PORT 1", 0, hue);
-                ROW("", 0, BODYHUE);
-                if (side) {
-                    ROW("KEYS", 0, HEADHUE);
-                    ROW("X / Y    FULLSCREEN", 0, BODYHUE);
-                    ROW("P        PAUSE", 0, BODYHUE);
-                    ROW("F2       SCREENSHOT", 0, BODYHUE);
-                    ROW("ESC      QUIT", 0, BODYHUE);
-                } else {
-                    ROW("THIS BUILD", 0, HEADHUE);
-                    ROW("68000 RECOMPILED TO C", 0, BODYHUE);
-                    ROW("NO EMULATOR LINKED IN", 0, BODYHUE);
-                    ROW(natbuf, 0, BODYHUE);
-                    ROW(fpsbuf, 0, hue);
-                }
-                #undef ROW
-
-                float logo_h = 0;
-                if (logo.id) logo_h = (pw - 24.0f) * logo.height / logo.width + 12;
-
-                /* largest size where every line fits the width and the
-                 * whole list fits the height */
-                int fs = 22;
-                for (; fs > 7; fs--) {
-                    int wide = 0, tall = (int)logo_h + 12;
-                    for (int i = 0; i < n; i++) {
-                        int sz = rows[i].head ? fs * 3 / 2 : fs;
-                        if (ui_measure(rows[i].t, sz) > pw - 24) wide = 1;
-                        tall += sz + sz / 2;
-                    }
-                    if (!wide && tall < ph - 12) break;
-                }
-
-                int x = px + 12, y = py + 10;
-                if (logo.id) {
-                    float lw = pw - 24.0f;
-                    DrawTexturePro(logo,
-                        (Rectangle){0, 0, logo.width, logo.height},
-                        (Rectangle){x, y, lw, lw * logo.height / logo.width},
-                        (Vector2){0, 0}, 0.0f, WHITE);
-                    y += (int)(lw * logo.height / logo.width) + 12;
-                }
-                for (int i = 0; i < n; i++) {
-                    int sz = rows[i].head ? fs * 3 / 2 : fs;
-                    if (rows[i].t[0]) ui_text(rows[i].t, x, y, sz, rows[i].c);
-                    y += sz + sz / 2;
-                }
-            }
-        }
+        if (bezel)
+            bezel_panels(&bz, GetFPS(), native_overrides_count(), 0,
+                         GetMousePosition());
         if (paused) ui_text("PAUSED", (int)dst.x + 12, (int)dst.y + 12,
                              20, RAYWHITE);
         if (shot_at >= 0 && swiv_frame_no >= shot_at && shot_path &&
