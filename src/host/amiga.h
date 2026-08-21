@@ -71,6 +71,17 @@ void amiga_get_voice(int channel, AmigaVoice *out);
  * it to know which of the game's four lists is on screen -- and with it,
  * what shape the picture being displayed actually is. */
 uint32_t amiga_get_coplc(void);
+
+/* Listening to one voice at a time.  A mute mask silences a channel in
+ * the mixer without touching the guest, so the game plays on and the
+ * chipset state is unchanged -- the difference is in the output only. */
+void amiga_voice_mute(int channel, int mute);
+int  amiga_voice_muted(int channel);
+
+/* The last `n` values this voice actually contributed to the mix, newest
+ * last.  Not the sample in chip RAM: what came out, at the pitch and
+ * volume the game asked for. */
+int  amiga_voice_scope(int channel, int16_t *out, int n);
 uint32_t amiga_bplpt0(void);
 void amiga_display_state(uint16_t *bplcon0, uint16_t *dmacon,
                          uint16_t *diwstrt, uint16_t *diwstop);

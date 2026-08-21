@@ -1500,9 +1500,8 @@ static void page_gfx(void)
 static void page_sound(void)
 {
     page_head("SOUND");
-    char buf[160];
-    const char *WHAT[4] = {"voice 0", "voice 1", "voice 2", "voice 3"};
-    float top = 80, rowh = (WIN_H - BAR_H - 110) / 4.0f;
+    char buf[192];
+    float top = 74, rowh = (WIN_H - BAR_H - 104) / 4.0f;
 
     for (int c = 0; c < 4; c++) {
         AmigaVoice v;
@@ -1513,50 +1512,68 @@ static void page_sound(void)
 
         float hz = v.period ? 3546895.0f / v.period : 0.0f;
         snprintf(buf, sizeof buf,
-                 "%s   %s   lc $%06x   playing $%06x   len %u words   "
+                 "VOICE %d   %s   lc $%06x   playing $%06x   %u words   "
                  "period %u  (%.0f Hz)   volume %u/64",
-                 WHAT[c], v.on ? "ON " : "off", v.lc, v.lc_play, v.lenlatch,
+                 c, v.on ? "ON " : "off", v.lc, v.lc_play, v.lenlatch,
                  v.period, hz, v.volume);
         ui_text(buf, (int)r.x + 10, (int)r.y + 8, 20,
                 v.on ? RAYWHITE : (Color){130, 130, 140, 255});
 
-        /* the sample itself, as signed bytes */
-        Rectangle w = {r.x + 10, r.y + 38, r.width - 20, r.height - 48};
+        /* Listening controls.  MUTE silences this voice in the mixer;
+         * SOLO silences the other three.  Neither touches the guest --
+         * the game plays on and the chipset state is untouched, so what
+         * you hear changes and nothing else does. */
+        int muted = amiga_voice_muted(c);
+        Rectangle mb = {r.x + r.width - 230, r.y + 6, 100, 30};
+        Rectangle sb = {r.x + r.width - 120, r.y + 6, 100, 30};
+        if (button(mb, muted ? "UNMUTE" : "MUTE", muted))
+            amiga_voice_mute(c, !muted);
+        int solo = !muted;
+        for (int k = 0; k < 4 && solo; k++)
+            if (k != c && !amiga_voice_muted(k)) solo = 0;
+        if (button(sb, "SOLO", solo)) {
+            if (solo) for (int k = 0; k < 4; k++) amiga_voice_mute(k, 0);
+            else      for (int k = 0; k < 4; k++) amiga_voice_mute(k, k != c);
+        }
+
+        /* What the voice actually put into the mix, newest at the right.
+         * Drawing the sample sitting in chip RAM instead was useless:
+         * once a one-shot has played, the game points the channel at a
+         * two-byte silent loop, and a two-byte waveform is a flat line. */
+        Rectangle w = {r.x + 10, r.y + 44, r.width - 20, r.height - 54};
         DrawRectangleRec(w, (Color){14, 14, 20, 255});
-        uint32_t base = v.lc_play ? v.lc_play : v.lc;
-        uint32_t len = (uint32_t)v.lenlatch * 2;
-        if (base >= 0x400 && base < CHIP_SIZE && len > 1) {
-            if (base + len > CHIP_SIZE) len = CHIP_SIZE - base;
-            float mid = w.y + w.height * 0.5f;
+        static int16_t scope[2048];
+        int n = amiga_voice_scope(c, scope, 2048);
+        float mid = w.y + w.height * 0.5f;
+        DrawLineEx((Vector2){w.x, mid}, (Vector2){w.x + w.width, mid}, 1.0f,
+                   (Color){40, 40, 50, 255});
+        if (n > 1) {
             int cols = (int)w.width;
+            Color line = muted ? (Color){90, 90, 100, 255}
+                       : v.on  ? (Color){120, 220, 160, 255}
+                               : (Color){80, 80, 90, 255};
             for (int x = 0; x < cols; x++) {
-                uint32_t i0 = (uint32_t)((float)x / cols * len);
-                uint32_t i1 = (uint32_t)((float)(x + 1) / cols * len);
+                int i0 = (int)((float)x / cols * n);
+                int i1 = (int)((float)(x + 1) / cols * n);
                 if (i1 <= i0) i1 = i0 + 1;
-                int lo = 127, hi = -128;
-                for (uint32_t i = i0; i < i1 && base + i < CHIP_SIZE; i++) {
-                    int s = (int8_t)chip[base + i];
-                    if (s < lo) lo = s;
-                    if (s > hi) hi = s;
+                int lo = 32767, hi = -32768;
+                for (int i = i0; i < i1 && i < n; i++) {
+                    if (scope[i] < lo) lo = scope[i];
+                    if (scope[i] > hi) hi = scope[i];
                 }
                 if (hi < lo) continue;
-                float y0 = mid - hi / 128.0f * (w.height * 0.5f - 2);
-                float y1 = mid - lo / 128.0f * (w.height * 0.5f - 2);
-                DrawLineEx((Vector2){w.x + x, y0}, (Vector2){w.x + x, y1}, 1.0f,
-                           v.on ? (Color){120, 220, 160, 255}
-                                : (Color){80, 80, 90, 255});
+                float y0 = mid - hi / 8192.0f * (w.height * 0.5f - 2);
+                float y1 = mid - lo / 8192.0f * (w.height * 0.5f - 2);
+                if (y0 < w.y) y0 = w.y;
+                if (y1 > w.y + w.height) y1 = w.y + w.height;
+                DrawLineEx((Vector2){w.x + x, y0}, (Vector2){w.x + x, y1},
+                           1.0f, line);
             }
-            /* where the voice has got to */
-            if (len) {
-                float px = w.x + w.width * ((float)(v.pos % len) / len);
-                DrawLineEx((Vector2){px, w.y}, (Vector2){px, w.y + w.height},
-                           2.0f, LABEL);
-            }
-        } else {
-            ui_text("no sample", (int)w.x + 10, (int)w.y + 10, 20,
-                    (Color){110, 110, 120, 255});
         }
     }
+    ui_text("MUTE silences one voice, SOLO silences the other three -- "
+            "in the mix only; the game is untouched",
+            16, WIN_H - BAR_H - 26, 18, LIGHTGRAY);
 }
 
 /* ---- in-game course map ---------------------------------------------
@@ -1845,14 +1862,21 @@ int main(int argc, char **argv)
             UnloadImage(s);
         }
 
-        /* The guest runs only while the game page is up.  Leaving it
-         * running behind a debug page meant walking away from the
-         * keyboard on the COURSE page and coming back to a race in
-         * progress -- the attract sequence does not need input. */
-        /* In --shot mode the page is chosen up front, so the guest has
-         * to keep running to reach the frame being captured. */
-        if (!offline && !paused && !frozen &&
-            (mode == MODE_GAME || shot_at >= 0)) {
+        /* GRAPHICS and SOUND are windows on LIVE state: the screen the
+         * copper is showing, the samples the voices are playing.  Frozen
+         * they show an instant, and if you reach them before the game
+         * has drawn or played anything they show nothing at all -- which
+         * is what "not populated" was.  So the guest keeps running on
+         * those.
+         *
+         * COURSE is the exception, and the reason the freeze exists: it
+         * is a static preview off a snapshot, and leaving the game
+         * running behind it meant walking away and coming back to a race
+         * in progress.
+         *
+         * Either way the pad and keyboard reach the guest only on the
+         * game page, so nothing steers it while you are looking. */
+        if (!offline && !paused && !frozen && mode != MODE_COURSE) {
             js_poll();
             /* Only the game page steers the game.  The debug pages use
              * the same arrows, stick and buttons to scrub and zoom, and

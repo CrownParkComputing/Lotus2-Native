@@ -1284,6 +1284,31 @@ static bool audio_transition_muted;
  * sample*volume, before the pan and the output filter) for measuring one
  * voice out of the mix. */
 static FILE *wav4; static int wav4_state = -1;
+
+/* A rolling window of what each voice put into the mix, for the RE
+ * viewer's scope, plus a mute mask it can drive. */
+#define VOICE_SCOPE 2048
+static int16_t voice_scope[4][VOICE_SCOPE];
+static int voice_scope_pos[4];
+static int voice_mute[4];
+
+void amiga_voice_mute(int channel, int mute)
+{
+    if (channel >= 0 && channel < 4) voice_mute[channel] = mute ? 1 : 0;
+}
+int amiga_voice_muted(int channel)
+{
+    return (channel >= 0 && channel < 4) ? voice_mute[channel] : 0;
+}
+int amiga_voice_scope(int channel, int16_t *out, int n)
+{
+    if (channel < 0 || channel > 3 || !out || n <= 0) return 0;
+    if (n > VOICE_SCOPE) n = VOICE_SCOPE;
+    int at = voice_scope_pos[channel];
+    for (int i = 0; i < n; i++)
+        out[i] = voice_scope[channel][(at + VOICE_SCOPE - n + i) % VOICE_SCOPE];
+    return n;
+}
 static void audio_mix(int16_t *output, int frames)
 {
     if (wav4_state < 0) { wav4 = getenv("SWIV_WAV4") ? fopen(getenv("SWIV_WAV4"), "wb") : NULL; wav4_state = wav4 ? 1 : 0; }
@@ -1310,6 +1335,10 @@ static void audio_mix(int16_t *output, int frames)
             int volume = state->volume > 64 ? 64 : state->volume;
             int32_t value = sample * volume;
             per_ch[channel] = (int16_t)value;
+            voice_scope[channel][voice_scope_pos[channel]] = (int16_t)value;
+            voice_scope_pos[channel] =
+                (voice_scope_pos[channel] + 1) % VOICE_SCOPE;
+            if (voice_mute[channel]) continue;
             if (channel == 0 || channel == 3) left += value;
             else right += value;
         }
