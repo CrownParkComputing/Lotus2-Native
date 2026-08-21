@@ -32,7 +32,9 @@ Bezel bezel_begin(float aw, float ah, Rectangle win);
 /* Draw the panels.  `fps` and `natives` fill the build column.  With
  * `want_debug_btn` set a DEBUG button is drawn at the foot of the left
  * panel; the return is 1 on the frame it is clicked. */
+/* `right_reserve` pixels are left free at the TOP of the right panel for
+ * the caller to draw into (the in-game course map lives there). */
 int bezel_panels(Bezel *b, int fps, int natives, int want_debug_btn,
-                 Vector2 mouse);
+                 Vector2 mouse, int right_reserve);
 
 #endif

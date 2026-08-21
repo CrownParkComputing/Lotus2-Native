@@ -2025,6 +2025,21 @@ void amiga_report(void)
     }
 }
 
+void amiga_get_voice(int channel, AmigaVoice *out)
+{
+    if (!out) return;
+    if (channel < 0 || channel > 3) { memset(out, 0, sizeof *out); return; }
+    const AudioChannel *state = &audio[channel];
+    out->lc = state->lc;
+    out->lc_play = state->lc_play;
+    out->pos = state->pos;
+    out->nbytes_play = state->nbytes_play;
+    out->lenlatch = state->lenlatch;
+    out->period = state->period;
+    out->volume = state->volume;
+    out->on = state->on;
+}
+
 void amiga_init(void)
 {
     memset(chip, 0, sizeof chip);

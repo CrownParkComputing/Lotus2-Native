@@ -57,6 +57,15 @@ void amiga_set_pc_hook(SwivPcHook hook);
 /* Live chipset state for debug tools: the 32 colour registers as RGB4
  * words, and the current bitplane 0 pointer (which buffer is on screen). */
 void amiga_get_palette(uint16_t out[32]);
+
+/* Paula channel state, for the RE viewer's SOUND page.  A read-only
+ * window on what the four voices are doing right now. */
+typedef struct {
+    uint32_t lc, lc_play, pos, nbytes_play;
+    uint16_t lenlatch, period, volume;
+    int on;
+} AmigaVoice;
+void amiga_get_voice(int channel, AmigaVoice *out);
 uint32_t amiga_bplpt0(void);
 void amiga_display_state(uint16_t *bplcon0, uint16_t *dmacon,
                          uint16_t *diwstrt, uint16_t *diwstop);

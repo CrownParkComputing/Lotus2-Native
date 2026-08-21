@@ -328,7 +328,7 @@ int main(int argc, char **argv)
                              2, UI_EDGE);
         if (bezel)
             bezel_panels(&bz, GetFPS(), native_overrides_count(), 0,
-                         GetMousePosition());
+                         GetMousePosition(), 0);
         if (paused) ui_text("PAUSED", (int)dst.x + 12, (int)dst.y + 12,
                              20, RAYWHITE);
         if (shot_at >= 0 && swiv_frame_no >= shot_at && shot_path &&

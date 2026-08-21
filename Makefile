@@ -115,13 +115,11 @@ play-min: build/lotus2_game
 	./build/lotus2_game --dir $(INSTALL) \
 		$(if $(RECORD),--record $(RECORD))
 
-# The same window as `make play`, but driving itself into a race with
-# auto-fire so the pages have live race state without anyone steering.
-# Auto-fire does not stop at the race -- on a menu it keeps choosing
-# things -- so it is off in `make play`.
+# The same window as `make play`, opened straight on the course preview.
+# The guest only runs on the game page, so this does NOT start the game:
+# you get the debug pages, and the game begins when you go to it.
 debug: build/lotus2_play
-	./build/lotus2_play --live --bezel --dir $(INSTALL) \
-		--fire-from 2100 --fire-period 100
+	./build/lotus2_play --live --bezel --dir $(INSTALL) --page COURSE
 
 # The debug viewer driven by recompiled C (map/track/geometry pages).
 build/lotus2_play: src/viewer/lotus2_view.c $(HOST) $(HOST_H) \

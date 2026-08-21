@@ -97,7 +97,7 @@ Bezel bezel_begin(float aw, float ah, Rectangle win)
 }
 
 int bezel_panels(Bezel *b, int fps, int natives, int want_debug_btn,
-                 Vector2 mouse)
+                 Vector2 mouse, int right_reserve)
 {
     bezel_assets();
     int clicked = 0;
@@ -107,7 +107,8 @@ int bezel_panels(Bezel *b, int fps, int natives, int want_debug_btn,
     for (int side = 0; side < 2; side++) {
         Rectangle p = side ? b->right : b->left;
         const int px = (int)p.x, pw = (int)p.width;
-        const int py = (int)p.y, ph = (int)p.height;
+        const int reserve = side ? right_reserve : 0;
+        const int py = (int)p.y + reserve, ph = (int)p.height - reserve;
         Color hue = side ? P2HUE : P1HUE;
         char fpsbuf[32], natbuf[40];
         snprintf(fpsbuf, sizeof fpsbuf, "%d FPS", fps);
@@ -139,6 +140,7 @@ int bezel_panels(Bezel *b, int fps, int natives, int want_debug_btn,
         if (side) {
             ROW("KEYS", 0, HEADHUE);
             ROW("X        COURSE PREVIEW", 0, hue);
+            ROW("         (pad X too)", 0, BODYHUE);
             ROW("F11      FULLSCREEN", 0, BODYHUE);
             ROW("P        PAUSE", 0, BODYHUE);
             ROW("F2       SCREENSHOT", 0, BODYHUE);

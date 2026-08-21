@@ -9,6 +9,9 @@
  *   PLAY     the game, driven by keyboard/pad
  *   COURSE   each course previewed in 3D by the game's own road chain,
  *            beside a top-down map, a gradient profile and a strip
+ *   GRAPHICS a planar bitmap viewer over chip RAM -- the loading and
+ *            course-intro pictures, decoded with the live palette
+ *   SOUND    the four Paula voices, their registers and their samples
  *
  * Keys: F2 screenshot, P pause, ESC back to PLAY, arrows+space drive.
  */
@@ -98,7 +101,7 @@ static int course_sel;
  * profile and strip).  The TRACK, GEOM and DISPLAY pages were
  * scaffolding for porting the render chain; that work is done and
  * they are gone. */
-enum { MODE_GAME, MODE_COURSE, MODE_COUNT };
+enum { MODE_GAME, MODE_COURSE, MODE_GFX, MODE_SOUND, MODE_COUNT };
 
 /* The game itself is the front page.  This tool used to boot the game
  * only to freeze it the moment the course data landed, which is useful
@@ -170,6 +173,23 @@ static void kv(int x, int y, const char *key, const char *value, int dx)
 static void page_head(const char *title)
 {
     ui_text(title, 16, 12, 34, RAYWHITE);
+}
+
+/* Edge-detect a joystick button, ignoring whatever it reads on the very
+ * FIRST look.  A pad holding a button at startup -- or a device that
+ * reports a phantom button down, which this family of dongles does --
+ * would otherwise register as a press on frame one and keep flipping
+ * pages.  That is what made the debug buttons look dead: the page moved
+ * before anyone touched anything. */
+static int js_edge(int pad, int button)
+{
+    static uint8_t was[2][16], seen[2][16];
+    if (pad < 0 || pad > 1 || button < 0 || button > 15) return 0;
+    int down = js_present(pad) && js_button_down(pad, button);
+    int edge = down && !was[pad][button] && seen[pad][button];
+    was[pad][button] = (uint8_t)down;
+    seen[pad][button] = 1;
+    return edge;
 }
 
 /* ---- course geometry ------------------------------------------------ */
@@ -277,7 +297,7 @@ __attribute__((unused)) static int course_here(void)
 static float course_scrub = 0;   /* segment index, fractional */
 static int course_follow = 1;
 static float course_zoom = 1.0f;
-static int course_playing = 0;      /* auto-drive the preview */
+static int /* keeps driving */;      /* auto-drive the preview */
 static int course_drive = 1;        /* poke the game to the scrub position */
 static Texture2D game_screen;       /* live game frame, drawn in the 3D pane */
 /* One sixteenth of a segment per frame, which is the smoothest the
@@ -492,8 +512,13 @@ static void roadplay_load(int course)
              "frame's, moved to the horizon)");
 }
 
+/* Set while the game page draws, so its map reads the course the GAME is
+ * on rather than whichever snapshot the preview page last loaded. */
+static int course_read_live;
+
 static const uint8_t *course_snapshot_table(void)
 {
+    if (course_read_live) return NULL;
     if (!rp_ready || rp_course != course_sel) return NULL;
     return rp_g.fast + (COURSE_BASE - GUEST_FAST_ADDR);
 }
@@ -1127,7 +1152,7 @@ static void page_course(void)
             course_load(COURSES[i].file);
             course_sel = i;
             course_scrub = 0;
-            course_playing = 0;
+            /* keeps driving */;
             roadplay_load(i);
         }
     }
@@ -1145,14 +1170,14 @@ static void page_course(void)
     Rectangle sb = {16, 818, WIN_W - 32, 34};
     if (ui_hit(sb) && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
         course_scrub = (mpos().x - sb.x) / sb.width * COURSE_SEGMENTS;
-        course_playing = 0;
+        /* keeps driving */;
     }
 
+    /* Always driving.  Scrubbing is how you choose WHERE on the course
+     * to be; it should not also have to be how you make the road move,
+     * so there is no separate DRIVE toggle any more. */
     float cy = 866, ch = 44;
-    if (button((Rectangle){16, cy, 110, ch},
-               course_playing ? "STOP" : "DRIVE", course_playing))
-        course_playing = !course_playing;
-    ui_text("SPEED", 140, (int)cy + 12, 20, LABEL);
+    ui_text("SPEED", 20, (int)cy + 12, 20, LABEL);
     static const float SPEEDS[] = {SEG_PER_FRAME * 0.25f,
                                    SEG_PER_FRAME * 0.5f,
                                    SEG_PER_FRAME,
@@ -1166,46 +1191,35 @@ static void page_course(void)
             course_speed = SPEEDS[k];
     }
     if (button((Rectangle){590, cy, 60, ch}, "|<", 0))
-        { course_scrub = 0; course_playing = 0; }
+        { course_scrub = 0; /* keeps driving */; }
     if (button((Rectangle){654, cy, 60, ch}, "<<", 0))
-        { course_scrub -= 25; course_playing = 0; }
+        { course_scrub -= 25; /* keeps driving */; }
     if (button((Rectangle){718, cy, 60, ch}, "<", 0))
-        { course_scrub -= 5; course_playing = 0; }
+        { course_scrub -= 5; /* keeps driving */; }
     if (button((Rectangle){782, cy, 60, ch}, ">", 0))
-        { course_scrub += 5; course_playing = 0; }
+        { course_scrub += 5; /* keeps driving */; }
     if (button((Rectangle){846, cy, 60, ch}, ">>", 0))
-        { course_scrub += 25; course_playing = 0; }
+        { course_scrub += 25; /* keeps driving */; }
     if (button((Rectangle){910, cy, 60, ch}, ">|", 0))
-        { course_scrub = COURSE_SEGMENTS - 1; course_playing = 0; }
+        { course_scrub = COURSE_SEGMENTS - 1; /* keeps driving */; }
     if (button((Rectangle){WIN_W - 130, cy, 114, ch}, "ZOOM", 0)) {
         course_zoom *= 2.0f;
         if (course_zoom > 8.5f) course_zoom = 1.0f;
     }
-    ui_text("pad: stick/dpad scrub, shoulders jump, A drive, B zoom     keys: arrows, shift+arrows, HOME/END",
+    ui_text("it drives by itself   -   pad: stick scrubs, shoulders jump, "
+            "B zooms the map     keys: arrows, shift+arrows, HOME/END",
             16, (int)cy + ch + 12, 18, LIGHTGRAY);
 
-    /* --- joystick / gamepad navigation ---------------------------------
-     * Left stick or d-pad scrubs, shoulders jump a chunk, A drives, B
-     * cycles the map zoom.  Deadzone keeps a resting stick from creeping.
+    /* --- joystick navigation --------------------------------------
+     * Through pad.c's own /dev/input/js reader, not raylib's gamepad
+     * API: pad.c opens the device directly and raylib may never see it,
+     * which is why the pad did nothing here before.
      */
-    if (IsGamepadAvailable(0)) {
-        float ax = GetGamepadAxisMovement(0, GAMEPAD_AXIS_LEFT_X);
-        if (ax < -0.25f || ax > 0.25f) {
-            /* a full deflection is about eight times race speed */
-            course_scrub += ax * SEG_PER_FRAME * 8.0f;
-            course_playing = 0;
-        }
-        if (IsGamepadButtonDown(0, GAMEPAD_BUTTON_LEFT_FACE_LEFT))
-            { course_scrub -= 2; course_playing = 0; }
-        if (IsGamepadButtonDown(0, GAMEPAD_BUTTON_LEFT_FACE_RIGHT))
-            { course_scrub += 2; course_playing = 0; }
-        if (IsGamepadButtonPressed(0, GAMEPAD_BUTTON_LEFT_TRIGGER_1))
-            { course_scrub -= 25; course_playing = 0; }
-        if (IsGamepadButtonPressed(0, GAMEPAD_BUTTON_RIGHT_TRIGGER_1))
-            { course_scrub += 25; course_playing = 0; }
-        if (IsGamepadButtonPressed(0, GAMEPAD_BUTTON_RIGHT_FACE_DOWN))
-            course_playing = !course_playing;
-        if (IsGamepadButtonPressed(0, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT)) {
+    if (js_present(0)) {
+        uint8_t st = gamepad_stick(0);
+        if (st & 0x04) course_scrub -= SEG_PER_FRAME * 8.0f;
+        if (st & 0x08) course_scrub += SEG_PER_FRAME * 8.0f;
+        if (js_edge(0, 1)) {                   /* B cycles the map zoom */
             course_zoom *= 2.0f;
             if (course_zoom > 8.5f) course_zoom = 1.0f;
         }
@@ -1216,20 +1230,263 @@ static void page_course(void)
      * speed, shift covers ground */
     float step = (IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT))
                ? 10.0f : 0.5f;
-    if (IsKeyDown(KEY_LEFT))  { course_scrub -= step; course_playing = 0; }
-    if (IsKeyDown(KEY_RIGHT)) { course_scrub += step; course_playing = 0; }
-    if (IsKeyPressed(KEY_HOME)) { course_scrub = 0; course_playing = 0; }
+    if (IsKeyDown(KEY_LEFT))  { course_scrub -= step; /* keeps driving */; }
+    if (IsKeyDown(KEY_RIGHT)) { course_scrub += step; /* keeps driving */; }
+    if (IsKeyPressed(KEY_HOME)) { course_scrub = 0; /* keeps driving */; }
     if (IsKeyPressed(KEY_END))
-        { course_scrub = COURSE_SEGMENTS - 1; course_playing = 0; }
+        { course_scrub = COURSE_SEGMENTS - 1; /* keeps driving */; }
     float wheel = GetMouseWheelMove();
     if (wheel && ui_hit(map)) {
         course_zoom *= wheel > 0 ? 1.25f : 0.8f;
         if (course_zoom < 1.0f) course_zoom = 1.0f;
         if (course_zoom > 16.0f) course_zoom = 16.0f;
     }
-    if (course_playing) course_scrub += course_speed;
+    course_scrub += course_speed;
     if (course_scrub < 0) course_scrub = 0;
     if (course_scrub > COURSE_SEGMENTS - 1) course_scrub = 0;
+}
+
+/* ---- GRAPHICS: what is actually in chip RAM ---------------------------
+ * A planar bitmap viewer over the guest's chip RAM, decoded with the
+ * live copper palette.  The loading and course-intro pictures are
+ * ordinary bitplanes in chip RAM like everything else, so pointing this
+ * at the screen buffers shows them; the address, plane count, width and
+ * row stride are all adjustable because a picture's geometry is not
+ * something to guess at.
+ */
+#define GFX_MAX_W 512
+#define GFX_MAX_H 320
+static uint32_t gfx_img[GFX_MAX_W * GFX_MAX_H];
+static Texture2D gfx_tex;
+static uint32_t gfx_addr = 0x10186;
+static int gfx_planes = 4, gfx_words = 20, gfx_rows = 200;
+static int gfx_stride = 42, gfx_plane_gap = 0x20d0;
+static int gfx_from_copper = 1;
+
+/* Known places to look, read from the base page rather than hardcoded. */
+static void gfx_take_buffer(uint32_t at)
+{
+    uint32_t v = r32(at);
+    if (v >= 0x400 && v < CHIP_SIZE) gfx_addr = v & ~1u;
+}
+
+static void gfx_decode(void)
+{
+    uint16_t pal[32];
+    amiga_get_palette(pal);
+    int w = gfx_words * 16;
+    if (w > GFX_MAX_W) w = GFX_MAX_W;
+    int h = gfx_rows > GFX_MAX_H ? GFX_MAX_H : gfx_rows;
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) {
+            unsigned idx = 0;
+            for (int p = 0; p < gfx_planes; p++) {
+                uint32_t at = gfx_addr + (uint32_t)p * gfx_plane_gap
+                            + (uint32_t)y * gfx_stride + (uint32_t)(x >> 3);
+                if (at >= CHIP_SIZE) continue;
+                if ((chip[at] >> (7 - (x & 7))) & 1) idx |= 1u << p;
+            }
+            uint16_t c = pal[idx & 31];
+            gfx_img[y * GFX_MAX_W + x] =
+                0xff000000u | (uint32_t)(((c >> 8) & 15) * 17)
+                | ((uint32_t)(((c >> 4) & 15) * 17) << 8)
+                | ((uint32_t)((c & 15) * 17) << 16);
+        }
+    for (int y = h; y < GFX_MAX_H; y++)
+        for (int x = 0; x < GFX_MAX_W; x++) gfx_img[y * GFX_MAX_W + x] = 0xff000000u;
+    for (int y = 0; y < h; y++)
+        for (int x = w; x < GFX_MAX_W; x++) gfx_img[y * GFX_MAX_W + x] = 0xff000000u;
+}
+
+static void page_gfx(void)
+{
+    page_head("GRAPHICS");
+    char buf[128];
+
+    /* the game's own idea of where its screens are */
+    static const struct { const char *name; uint32_t at; } SLOTS[] = {
+        {"SHOWN",  A3 + 0x2f8a}, {"DRAWN", A3 + 0x2f8e},
+        {"THIRD",  A3 + 0x2f92}, {"SCR A", A3 + 0x2fd6},
+        {"SCR B",  A3 + 0x2fda},
+    };
+    for (int i = 0; i < 5; i++) {
+        Rectangle b = {16 + i * 132, 64, 126, 34};
+        uint32_t v = r32(SLOTS[i].at) & ~1u;
+        int on = (v == gfx_addr) || ((v + 2) == gfx_addr);
+        snprintf(buf, sizeof buf, "%s", SLOTS[i].name);
+        if (button(b, buf, on)) gfx_take_buffer(SLOTS[i].at);
+    }
+
+    /* geometry, because a picture's shape is not a thing to guess */
+    int bx = 16, by = 110, bh = 32;
+    snprintf(buf, sizeof buf, "$%06x", gfx_addr);
+    ui_text("ADDR", bx, by + 6, 20, LABEL);
+    ui_text(buf, bx + 60, by + 6, 20, RAYWHITE);
+    if (button((Rectangle){bx + 150, by, 44, bh}, "-1k", 0))
+        gfx_addr = gfx_addr > 0x400 ? gfx_addr - 0x400 : 0;
+    if (button((Rectangle){bx + 198, by, 44, bh}, "+1k", 0))
+        gfx_addr += 0x400;
+    if (button((Rectangle){bx + 246, by, 50, bh}, "-row", 0))
+        gfx_addr = gfx_addr > (uint32_t)gfx_stride ? gfx_addr - gfx_stride : 0;
+    if (button((Rectangle){bx + 300, by, 50, bh}, "+row", 0))
+        gfx_addr += gfx_stride;
+
+    ui_text("PLANES", bx + 380, by + 6, 20, LABEL);
+    for (int p = 1; p <= 6; p++) {
+        snprintf(buf, sizeof buf, "%d", p);
+        if (button((Rectangle){bx + 460 + (p - 1) * 40, by, 36, bh}, buf,
+                   p == gfx_planes)) gfx_planes = p;
+    }
+    ui_text("STRIDE", bx + 720, by + 6, 20, LABEL);
+    static const int STRIDES[] = {40, 42, 44, 48, 80};
+    for (int i = 0; i < 5; i++) {
+        snprintf(buf, sizeof buf, "%d", STRIDES[i]);
+        if (button((Rectangle){bx + 800 + i * 52, by, 48, bh}, buf,
+                   gfx_stride == STRIDES[i])) gfx_stride = STRIDES[i];
+    }
+    ui_text("WIDTH", bx + 1080, by + 6, 20, LABEL);
+    static const int WORDS[] = {16, 20, 22, 24, 32};
+    for (int i = 0; i < 5; i++) {
+        snprintf(buf, sizeof buf, "%d", WORDS[i] * 16);
+        if (button((Rectangle){bx + 1160 + i * 62, by, 58, bh}, buf,
+                   gfx_words == WORDS[i])) gfx_words = WORDS[i];
+    }
+    snprintf(buf, sizeof buf, "plane gap $%04x", gfx_plane_gap);
+    ui_text(buf, bx + 1490, by + 6, 20, LABEL);
+    if (button((Rectangle){bx + 1660, by, 60, bh}, "$20d0", gfx_plane_gap == 0x20d0))
+        gfx_plane_gap = 0x20d0;
+    if (button((Rectangle){bx + 1726, by, 60, bh}, "1 pic", gfx_plane_gap == gfx_stride * gfx_rows))
+        gfx_plane_gap = gfx_stride * gfx_rows;
+
+    gfx_decode();
+    UpdateTexture(gfx_tex, gfx_img);
+    Rectangle area = {16, 156, WIN_W - 32, WIN_H - BAR_H - 176};
+    DrawRectangleRec(area, PANEL_BG);
+    float sc = area.width / (float)(gfx_words * 16);
+    float sy = area.height / (float)gfx_rows;
+    if (sy < sc) sc = sy;
+    Rectangle dst = {area.x + (area.width - gfx_words * 16 * sc) / 2,
+                     area.y + (area.height - gfx_rows * sc) / 2,
+                     gfx_words * 16 * sc, gfx_rows * sc};
+    DrawTexturePro(gfx_tex,
+                   (Rectangle){0, 0, (float)(gfx_words * 16), (float)gfx_rows},
+                   dst, (Vector2){0, 0}, 0.0f, WHITE);
+    DrawRectangleLinesEx(area, 1, GRID);
+    (void)gfx_from_copper;
+}
+
+/* ---- SOUND: the four Paula voices ------------------------------------
+ * Everything here is read straight out of the chipset state: location,
+ * length, period and volume as the game programmed them, and the sample
+ * each voice is playing, drawn from chip RAM as signed bytes.  Period
+ * converts to pitch with the PAL colour clock, 3546895 / period.
+ */
+static void page_sound(void)
+{
+    page_head("SOUND");
+    char buf[160];
+    const char *WHAT[4] = {"voice 0", "voice 1", "voice 2", "voice 3"};
+    float top = 80, rowh = (WIN_H - BAR_H - 110) / 4.0f;
+
+    for (int c = 0; c < 4; c++) {
+        AmigaVoice v;
+        amiga_get_voice(c, &v);
+        Rectangle r = {16, top + c * rowh, WIN_W - 32, rowh - 12};
+        DrawRectangleRec(r, PANEL_BG);
+        DrawRectangleLinesEx(r, 1, v.on ? (Color){90, 200, 120, 255} : GRID);
+
+        float hz = v.period ? 3546895.0f / v.period : 0.0f;
+        snprintf(buf, sizeof buf,
+                 "%s   %s   lc $%06x   playing $%06x   len %u words   "
+                 "period %u  (%.0f Hz)   volume %u/64",
+                 WHAT[c], v.on ? "ON " : "off", v.lc, v.lc_play, v.lenlatch,
+                 v.period, hz, v.volume);
+        ui_text(buf, (int)r.x + 10, (int)r.y + 8, 20,
+                v.on ? RAYWHITE : (Color){130, 130, 140, 255});
+
+        /* the sample itself, as signed bytes */
+        Rectangle w = {r.x + 10, r.y + 38, r.width - 20, r.height - 48};
+        DrawRectangleRec(w, (Color){14, 14, 20, 255});
+        uint32_t base = v.lc_play ? v.lc_play : v.lc;
+        uint32_t len = (uint32_t)v.lenlatch * 2;
+        if (base >= 0x400 && base < CHIP_SIZE && len > 1) {
+            if (base + len > CHIP_SIZE) len = CHIP_SIZE - base;
+            float mid = w.y + w.height * 0.5f;
+            int cols = (int)w.width;
+            for (int x = 0; x < cols; x++) {
+                uint32_t i0 = (uint32_t)((float)x / cols * len);
+                uint32_t i1 = (uint32_t)((float)(x + 1) / cols * len);
+                if (i1 <= i0) i1 = i0 + 1;
+                int lo = 127, hi = -128;
+                for (uint32_t i = i0; i < i1 && base + i < CHIP_SIZE; i++) {
+                    int s = (int8_t)chip[base + i];
+                    if (s < lo) lo = s;
+                    if (s > hi) hi = s;
+                }
+                if (hi < lo) continue;
+                float y0 = mid - hi / 128.0f * (w.height * 0.5f - 2);
+                float y1 = mid - lo / 128.0f * (w.height * 0.5f - 2);
+                DrawLineEx((Vector2){w.x + x, y0}, (Vector2){w.x + x, y1}, 1.0f,
+                           v.on ? (Color){120, 220, 160, 255}
+                                : (Color){80, 80, 90, 255});
+            }
+            /* where the voice has got to */
+            if (len) {
+                float px = w.x + w.width * ((float)(v.pos % len) / len);
+                DrawLineEx((Vector2){px, w.y}, (Vector2){px, w.y + w.height},
+                           2.0f, LABEL);
+            }
+        } else {
+            ui_text("no sample", (int)w.x + 10, (int)w.y + 10, 20,
+                    (Color){110, 110, 120, 255});
+        }
+    }
+}
+
+/* ---- in-game course map ---------------------------------------------
+ * The same integrated centreline the preview page draws, in the corner
+ * of the player 2 panel while a race is on, with the car where the
+ * game's own course position says it is.
+ */
+static void draw_race_map(Rectangle r)
+{
+    DrawRectangleRec(r, (Color){12, 12, 18, 255});
+    DrawRectangleLinesEx(r, 1, (Color){70, 70, 82, 255});
+
+    float spanx = course_maxx - course_minx, spany = course_maxy - course_miny;
+    if (spanx < 1) spanx = 1;
+    if (spany < 1) spany = 1;
+    float s = (r.width - 16) / spanx;
+    if ((r.height - 16) / spany < s) s = (r.height - 16) / spany;
+    float cx = r.x + r.width * 0.5f, cy = r.y + r.height * 0.5f;
+    float fx = (course_minx + course_maxx) * 0.5f;
+    float fy = (course_miny + course_maxy) * 0.5f;
+
+    for (int i = 0; i < COURSE_SEGMENTS; i++) {
+        Vector2 a = {cx + (course_path[i].p.x - fx) * s,
+                     cy - (course_path[i].p.y - fy) * s};
+        Vector2 b = {cx + (course_path[i + 1].p.x - fx) * s,
+                     cy - (course_path[i + 1].p.y - fy) * s};
+        int c = course_curve(i);
+        Color col = c > 0 ? (Color){250, 160, 90, 255}
+                  : c < 0 ? (Color){90, 170, 250, 255}
+                          : (Color){150, 200, 120, 255};
+        DrawLineEx(a, b, 2.0f, col);
+    }
+    /* where the car is, from the game's own 16.16 course position */
+    float here = r32(A3 + 0x30d8) / 65536.0f;
+    int i = (int)here;
+    if (i < 0) i = 0;
+    if (i > COURSE_SEGMENTS - 1) i = COURSE_SEGMENTS - 1;
+    float t = here - i;
+    Vector2 p = {cx + (course_path[i].p.x
+                       + (course_path[i + 1].p.x - course_path[i].p.x) * t
+                       - fx) * s,
+                 cy - (course_path[i].p.y
+                       + (course_path[i + 1].p.y - course_path[i].p.y) * t
+                       - fy) * s};
+    DrawCircleV(p, 5, (Color){255, 238, 136, 255});
+    DrawCircleLinesV(p, 7, RAYWHITE);
 }
 
 /* Set by page_game when the panel's DEBUG button is clicked. */
@@ -1238,6 +1495,7 @@ static int game_debug_clicked;
  * and `make debug` are the same window and the debug pages are a button
  * away rather than a different program. */
 static int use_bezel;
+static int offline_mode;
 int native_overrides_count(void);
 
 static void page_game(void)
@@ -1255,9 +1513,21 @@ static void page_game(void)
                                          bz.game.width + 4,
                                          bz.game.height + 4},
                              2, BTN_EDGE);
+        /* A race gives the map something to show; the menus do not. */
+        int mapping = 0;
+        Rectangle mr = {0};
+        course_read_live = 1;
+        if (!offline_mode && course_data_ready()) {
+            float mw = bz.right.width - 16;
+            mr = (Rectangle){bz.right.x + 8, bz.right.y + 8, mw, mw};
+            mapping = 1;
+            course_integrate();
+        }
         if (bezel_panels(&bz, GetFPS(), native_overrides_count(), 1,
-                         mpos()))
+                         mpos(), mapping ? (int)mr.height + 14 : 0))
             game_debug_clicked = 1;
+        if (mapping) draw_race_map(mr);
+        course_read_live = 0;
         return;
     }
     float s = (float)WIN_W / SCREEN_W;
@@ -1315,7 +1585,13 @@ int main(int argc, char **argv)
         }
         else if (!strcmp(argv[i], "--page") && i + 1 < argc) {
             const char *w = argv[++i];
-            shot_mode = !strcmp(w, "COURSE") ? MODE_COURSE : MODE_GAME;
+            shot_mode = !strcmp(w, "COURSE") ? MODE_COURSE
+                      : !strcmp(w, "GFX")    ? MODE_GFX
+                      : !strcmp(w, "SOUND")  ? MODE_SOUND : MODE_GAME;
+            /* opening ON a debug page means the game is NOT running when
+             * you get there -- the guest only runs on the game page --
+             * so `make debug` no longer starts a race behind your back */
+            mode = shot_mode;
         }
         else {
             fprintf(stderr,
@@ -1369,6 +1645,7 @@ int main(int argc, char **argv)
         }
 
     int offline = course_path && course_load(course_path);
+    offline_mode = offline;
     AudioStream stream = {0};
     if (!offline) {
         InitAudioDevice();
@@ -1397,6 +1674,10 @@ int main(int argc, char **argv)
                    .mipmaps = 1,
                    .format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8 };
     road_tex = LoadTextureFromImage(rimg);
+    Image gimg = { .data = gfx_img, .width = GFX_MAX_W, .height = GFX_MAX_H,
+                   .mipmaps = 1,
+                   .format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8 };
+    gfx_tex = LoadTextureFromImage(gimg);
     amiga_set_pc_hook(road_pc_hook);
     bool paused = false, frozen = false, freeze_on_course = false;
 
@@ -1411,6 +1692,8 @@ int main(int argc, char **argv)
         if (IsKeyPressed(KEY_F11)) ToggleFullscreen();
         if (IsKeyPressed(KEY_ONE))   mode = MODE_GAME;
         if (IsKeyPressed(KEY_TWO))   mode = MODE_COURSE;
+        if (IsKeyPressed(KEY_THREE)) mode = MODE_GFX;
+        if (IsKeyPressed(KEY_FOUR))  mode = MODE_SOUND;
         /* D from the play screen, or the panel's DEBUG button */
         /* Consume the click.  It is a LATCH set during the draw phase,
          * and leaving it set meant ESC put you back on the game page and
@@ -1418,22 +1701,27 @@ int main(int argc, char **argv)
          * -- there was no way back. */
         int want_debug = game_debug_clicked;
         game_debug_clicked = 0;
-        if (mode == MODE_GAME &&
-            (IsKeyPressed(KEY_X) || IsKeyPressed(KEY_D) || want_debug ||
-             (IsGamepadAvailable(0) &&
-              IsGamepadButtonPressed(0, GAMEPAD_BUTTON_RIGHT_FACE_LEFT))))
-            mode = MODE_COURSE;
-        /* Pad navigation, so the debug pages are reachable without
-         * reaching for the keyboard.  The face and shoulder buttons are
-         * already taken by the pages themselves (scrub, jump, drive,
-         * zoom), so paging lives on SELECT and START. */
-        if (IsGamepadAvailable(0)) {
-            if (IsGamepadButtonPressed(0, GAMEPAD_BUTTON_MIDDLE_LEFT))
-                mode = (mode + 1) % MODE_COUNT;
-            if (IsGamepadButtonPressed(0, GAMEPAD_BUTTON_MIDDLE_RIGHT))
-                mode = MODE_GAME;
-            if (IsGamepadButtonPressed(0, GAMEPAD_BUTTON_MIDDLE))
-                ToggleFullscreen();
+
+        /* X TOGGLES the preview, from the keyboard or the pad.
+         *
+         * The pad half has to go through js_button_down, not raylib's
+         * gamepad API: pad.c opens /dev/input/js0 directly and reads the
+         * events itself, so raylib's own gamepad may never see the
+         * device at all -- which is why pressing X on the pad did
+         * nothing while the log showed the button arriving.  Button 2 is
+         * X on an SDL-style layout (0 A, 1 B, 2 X, 3 Y). */
+        int pad_x_edge = js_edge(0, 2);
+
+        if (IsKeyPressed(KEY_X) || IsKeyPressed(KEY_D) || pad_x_edge ||
+            want_debug)
+            mode = (mode == MODE_GAME) ? MODE_COURSE : MODE_GAME;
+        /* the pad's shoulder buttons walk the debug pages once you are
+         * in them; on the game page they belong to the game */
+        if (mode != MODE_GAME) {
+            if (js_edge(0, 5)) mode = mode + 1 > MODE_SOUND ? MODE_COURSE
+                                                           : mode + 1;
+            if (js_edge(0, 4)) mode = mode - 1 < MODE_COURSE ? MODE_SOUND
+                                                            : mode - 1;
         }
         if (IsKeyPressed(KEY_F2)) {
             Image s = LoadImageFromScreen();
@@ -1445,7 +1733,10 @@ int main(int argc, char **argv)
          * running behind a debug page meant walking away from the
          * keyboard on the COURSE page and coming back to a race in
          * progress -- the attract sequence does not need input. */
-        if (!offline && !paused && !frozen && mode == MODE_GAME) {
+        /* In --shot mode the page is chosen up front, so the guest has
+         * to keep running to reach the frame being captured. */
+        if (!offline && !paused && !frozen &&
+            (mode == MODE_GAME || shot_at >= 0)) {
             js_poll();
             /* Only the game page steers the game.  The debug pages use
              * the same arrows, stick and buttons to scrub and zoom, and
@@ -1486,6 +1777,8 @@ int main(int argc, char **argv)
         ClearBackground(BAR_BG);
         switch (mode) {
         case MODE_COURSE:  page_course(); break;
+        case MODE_GFX:     page_gfx(); break;
+        case MODE_SOUND:   page_sound(); break;
         default:           page_game(); break;
         }
 
@@ -1499,15 +1792,14 @@ int main(int argc, char **argv)
             float r1 = by + 26, r2 = by + 72, bh = 40;
             if (button((Rectangle){8, r1, 220, bh}, "BACK TO GAME", 0))
                 mode = MODE_GAME;
-            if (button((Rectangle){WIN_W - 108, r1, 100, bh},
-                       paused ? "RESUME" : "PAUSE", paused)) paused = !paused;
-            if (button((Rectangle){WIN_W - 216, r1, 100, bh}, "SHOT", 0)) {
-                Image sh = LoadImageFromScreen();
-                ExportImage(sh, "lotus2view.png");
-                UnloadImage(sh);
-            }
-            ui_text("ESC back to the game   F2 screenshot   [ ] scrub   "
-                    "pad: SELECT swaps page",
+            if (button((Rectangle){236, r1, 150, bh}, "COURSES",
+                       mode == MODE_COURSE)) mode = MODE_COURSE;
+            if (button((Rectangle){394, r1, 150, bh}, "GRAPHICS",
+                       mode == MODE_GFX)) mode = MODE_GFX;
+            if (button((Rectangle){552, r1, 130, bh}, "SOUND",
+                       mode == MODE_SOUND)) mode = MODE_SOUND;
+            ui_text("X or ESC back to the game   2 courses  3 graphics  "
+                    "4 sound   pad shoulders page   F2 screenshot",
                     8, (int)r2 + 12, 18, LIGHTGRAY);
         }
         EndTextureMode();
@@ -1550,6 +1842,7 @@ int main(int argc, char **argv)
     }
     UnloadTexture(screen);
     UnloadTexture(road_tex);
+    UnloadTexture(gfx_tex);
     UnloadRenderTexture(canvas_rt);
     CloseWindow();
     return 0;
