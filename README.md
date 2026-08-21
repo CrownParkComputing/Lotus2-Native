@@ -10,9 +10,13 @@ is a build gate that fails if a single emulator symbol reaches the
 native executable.
 
 ```
-make play        # play it
-make debug       # play it with the RE pages one keypress away
+./run.sh         # build it and play it
+./run.sh debug   # ...starting on the course preview instead
 ```
+
+One binary: the game with its bezel, and the RE pages a button away.  X
+swaps between them, on the keyboard or the pad.  `make play` and `make
+debug` do the same thing.
 
 You supply the game.  The retail WHDLoad install lives in
 `original/Lotus2CD32/` and is never committed — see *Legal* below.
