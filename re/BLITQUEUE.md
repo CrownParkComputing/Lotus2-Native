@@ -266,6 +266,39 @@ long  BLTAPT
 word  BLTSIZE
 ```
 
+## Who writes each type
+
+Searching for the type as a constant finds almost nothing, and that is
+the point: **the type is data, not a literal.**  `$216494` writes it
+straight out of a variable --
+
+```
+$216494  move.w  ($2f4e,A3), (A4)+      ; the type
+$216498  cmpi.w  #$4, ($2fbc,A3)
+$21649e  addq.w  #1, (-$2,A4)           ; ... one higher when $2fbc >= 4
+```
+
+-- so one routine emits types $1 through $5 depending on what
+`$2f4e(A3)` holds, which is why grepping for `move.w #$4,(A4)+` turns up
+nothing.  Found by tracing A4 instead: for each record boundary, the
+instruction that stepped A4 from the record's start to start+2 is the
+one that wrote the type.
+
+| type | written by | ported? |
+| --- | --- | --- |
+| $1, $4, $5 | `$216494`, inside the scenery emitter | yes, `scen_emit()` |
+| $6, $7 | `$216acc`, `$216b52` | yes, `span_fill()`'s emitters |
+| $b, $c | `$2149c6`, the weather emitter | yes, `weather_emit()` |
+| $2, $3, $a | not seen in either captured course | -- |
+
+A single STORM frame's queue holds: one type $1, eight $4, eight $5,
+four $b, eight $c, and the zero that ends it.
+
+So every record type this game has been observed to write is produced by
+code that is already ported and gated.  What the preview still lacks is
+not the emitters -- it is the scheduler above them that decides WHICH
+objects to emit.
+
 ## Cross-checks
 
 `road_blitqueue()` ($2143c2) writes the shapes types $6 and $7 read, field
