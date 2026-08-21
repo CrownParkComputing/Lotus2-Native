@@ -824,6 +824,29 @@ What is genuinely left, in dependency order:
   (`$62810`, 9-command dispatcher); no sound in the native build at all.
 * **`copper.txt` capture** (WHD_COPPER) for the road copper list.
 
+### data provenance settled (2026-08-21)
+
+Two other copies of the game were checked to see whether they held
+anything `Disk.1` does not:
+
+* **The Classic Lotus Trilogy CD32 disc** is a real ISO9660 image
+  (MODE1/2352, volume `LOTUS`) holding `alotusloader`, `AMENU`,
+  `loader.bin`, `LOTUS1.A`, `LOTUS2.A`, `LOTUS3.A/B` and a startup
+  sequence.  **`LOTUS2.A` is byte-identical to `original/Lotus2CD32/
+  Disk.1`** -- same 958468 bytes, same SHA1.  So our data source is
+  exactly the shipped game, complete, and the disc adds nothing to it.
+  `loader.bin` (32032 bytes) is the CD32 loader and has not been looked
+  at; it is the only part of that disc we do not already have.
+
+* **The cracked ADF** (Gremlin 1991, cr CPY) is a DOS bootblock over
+  packed raw tracks: no filesystem, no strings, no trainer, 96% non-zero.
+  Nothing extractable.
+
+Worth stating plainly because it closes a line of enquiry: the missing
+piece was never the course data, which has been sitting in `Disk.1` all
+along.  It is REACHING courses 2-8 at runtime, which needs the password
+screen, which needs the keyboard.
+
 ## Decisions worth flagging
 
 * **0.5 MB ChipMem.**  The SWIV default `CHIP_SIZE = 0x80000` is
