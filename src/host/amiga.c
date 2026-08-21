@@ -1337,20 +1337,35 @@ int amiga_audio_fill(void)
     return atomic_load_explicit(&audio_fill, memory_order_acquire);
 }
 
-void amiga_audio_frame(void)
+/* Mix exactly `frames` samples into the ring.
+ *
+ * Rate correction has to be done in samples, not in whole video frames.
+ * The device consumes 44100 a second while the game produces 882 per
+ * frame at 49.75 fps -- a deficit of a few hundred samples a second.
+ * Correcting that by mixing an extra 882-sample frame overshoots by two
+ * orders of magnitude, so the ring surges and starves by turns, and the
+ * pitch wobbles with it.  That is the rasp.
+ */
+void amiga_audio_generate(int frames)
 {
-    enum { FRAMES = AUDIO_RATE / 50 };
-    if (atomic_load_explicit(&audio_fill, memory_order_acquire) + FRAMES >
-        AUDIO_RING_FRAMES) return;
-    int16_t mixed[FRAMES * 2];
-    audio_mix(mixed, FRAMES);
-    for (int frame = 0; frame < FRAMES; frame++) {
-        audio_ring[audio_write_pos * 2] = mixed[frame * 2];
-        audio_ring[audio_write_pos * 2 + 1] = mixed[frame * 2 + 1];
-        audio_write_pos = (audio_write_pos + 1) % AUDIO_RING_FRAMES;
+    enum { CHUNK = AUDIO_RATE / 50 };
+    int16_t mixed[CHUNK * 2];
+    while (frames > 0) {
+        int n = frames < CHUNK ? frames : CHUNK;
+        if (atomic_load_explicit(&audio_fill, memory_order_acquire) + n >
+            AUDIO_RING_FRAMES) return;
+        audio_mix(mixed, n);
+        for (int frame = 0; frame < n; frame++) {
+            audio_ring[audio_write_pos * 2] = mixed[frame * 2];
+            audio_ring[audio_write_pos * 2 + 1] = mixed[frame * 2 + 1];
+            audio_write_pos = (audio_write_pos + 1) % AUDIO_RING_FRAMES;
+        }
+        atomic_fetch_add_explicit(&audio_fill, n, memory_order_release);
+        frames -= n;
     }
-    atomic_fetch_add_explicit(&audio_fill, FRAMES, memory_order_release);
 }
+
+void amiga_audio_frame(void) { amiga_audio_generate(AUDIO_RATE / 50); }
 
 int amiga_audio_pull(int16_t *output, int frames)
 {

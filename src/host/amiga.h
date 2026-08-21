@@ -98,6 +98,7 @@ void amiga_enable_video(bool enabled);
 void amiga_key_event(uint8_t rawcode, bool up);
 bool amiga_kbd_idle(void);
 void amiga_audio_frame(void);
+void amiga_audio_generate(int frames);
 int amiga_audio_pull(int16_t *output, int frames);
 int amiga_audio_fill(void);
 void swiv_instr_hook(unsigned int pc);
