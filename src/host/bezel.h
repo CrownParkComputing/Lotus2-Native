@@ -37,4 +37,7 @@ Bezel bezel_begin(float aw, float ah, Rectangle win);
 int bezel_panels(Bezel *b, int fps, int natives, int want_debug_btn,
                  Vector2 mouse, int right_reserve);
 
+/* What the picture is being scaled with, for the panel legend. */
+extern const char *bezel_scaler;
+
 #endif

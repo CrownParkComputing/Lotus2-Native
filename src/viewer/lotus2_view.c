@@ -1689,6 +1689,87 @@ static void draw_race_map(Rectangle r)
     DrawCircleLinesV(p, 7, RAYWHITE);
 }
 
+/* ---- upscaling the picture ------------------------------------------
+ * Scale3x (AdvMAME3x): for each pixel, look at its four orthogonal
+ * neighbours and fill a 3x3 block, rounding a corner only where two
+ * adjacent neighbours agree and the diagonal does not.  It invents no
+ * colours -- every output pixel is one of the input pixels -- so the
+ * game's palette survives, which bilinear smoothing does not manage.
+ *
+ * This cannot add detail the game never drew.  It cleans up the
+ * diagonals in the art; the road is still rasterised at 320 wide, and
+ * making THAT sharper is a different job (a renderer that draws the
+ * road's own edge stream at a higher resolution, rather than a filter
+ * over the result).
+ */
+enum { UP_SHARP, UP_SCALE3X, UP_SMOOTH, UP_COUNT };
+static const char *const UP_NAME[UP_COUNT] = { "SHARP", "SCALE3X", "SMOOTH" };
+static int up_mode = UP_SCALE3X;
+static uint32_t up_buf[GAME_W * 3 * GAME_H * 3];
+static Texture2D up_tex;
+
+static void scale3x(const uint32_t *in, int inw, int x0, int y0,
+                    int w, int h, uint32_t *out)
+{
+    const int ow = w * 3;
+    for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+            #define PX(dx, dy) in[(y0 + (y) + (dy)) * inw + (x0 + (x) + (dx))]
+            uint32_t e = PX(0, 0);
+            uint32_t b = y > 0 ? PX(0, -1) : e;
+            uint32_t h_ = y < h - 1 ? PX(0, 1) : e;
+            uint32_t d = x > 0 ? PX(-1, 0) : e;
+            uint32_t f = x < w - 1 ? PX(1, 0) : e;
+            uint32_t a = (x > 0 && y > 0) ? PX(-1, -1) : e;
+            uint32_t c = (x < w - 1 && y > 0) ? PX(1, -1) : e;
+            uint32_t g = (x > 0 && y < h - 1) ? PX(-1, 1) : e;
+            uint32_t i = (x < w - 1 && y < h - 1) ? PX(1, 1) : e;
+            #undef PX
+            uint32_t o[9];
+            for (int k = 0; k < 9; k++) o[k] = e;
+            if (d == b && d != h_ && b != f) o[0] = d;
+            if ((d == b && d != h_ && b != f && e != c) ||
+                (b == f && b != d && f != h_ && e != a)) o[1] = b;
+            if (b == f && b != d && f != h_) o[2] = f;
+            if ((h_ == d && h_ != f && d != b && e != a) ||
+                (d == b && d != h_ && b != f && e != g)) o[3] = d;
+            if ((b == f && b != d && f != h_ && e != i) ||
+                (f == h_ && f != b && h_ != d && e != c)) o[5] = f;
+            if (h_ == d && h_ != f && d != b) o[6] = d;
+            if ((f == h_ && f != b && h_ != d && e != g) ||
+                (h_ == d && h_ != f && d != b && e != i)) o[7] = h_;
+            if (f == h_ && f != b && h_ != d) o[8] = f;
+            for (int k = 0; k < 9; k++)
+                out[(y * 3 + k / 3) * ow + x * 3 + k % 3] = o[k];
+        }
+    }
+}
+
+/* Draw the game window into `dst` at the chosen quality. */
+static void draw_game_picture(Rectangle dst)
+{
+    if (up_mode == UP_SCALE3X) {
+        scale3x(framebuf, SCREEN_W, GAME_OX, GAME_OY, GAME_W, GAME_H, up_buf);
+        if (!up_tex.id) {
+            Image im = { .data = up_buf, .width = GAME_W * 3,
+                         .height = GAME_H * 3, .mipmaps = 1,
+                         .format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8 };
+            up_tex = LoadTextureFromImage(im);
+            SetTextureFilter(up_tex, TEXTURE_FILTER_BILINEAR);
+        }
+        UpdateTexture(up_tex, up_buf);
+        DrawTexturePro(up_tex,
+                       (Rectangle){0, 0, GAME_W * 3, GAME_H * 3}, dst,
+                       (Vector2){0, 0}, 0.0f, WHITE);
+        return;
+    }
+    SetTextureFilter(game_screen, up_mode == UP_SMOOTH
+                     ? TEXTURE_FILTER_BILINEAR : TEXTURE_FILTER_POINT);
+    DrawTexturePro(game_screen,
+                   (Rectangle){GAME_OX, GAME_OY, GAME_W, GAME_H}, dst,
+                   (Vector2){0, 0}, 0.0f, WHITE);
+}
+
 /* Set by page_game when the panel's DEBUG button is clicked. */
 static int game_debug_clicked;
 /* --bezel: the play front end's surround on the game page, so `make play`
@@ -1706,9 +1787,7 @@ static void page_game(void)
          * it is drawn on a 1:1 window. */
         Bezel bz = bezel_begin(4.0f, 3.0f,
                                (Rectangle){0, 0, WIN_W, WIN_H});
-        Rectangle src = { GAME_OX, GAME_OY, GAME_W, GAME_H };
-        DrawTexturePro(game_screen, src, bz.game, (Vector2){0, 0}, 0.0f,
-                       WHITE);
+        draw_game_picture(bz.game);
         DrawRectangleLinesEx((Rectangle){bz.game.x - 2, bz.game.y - 2,
                                          bz.game.width + 4,
                                          bz.game.height + 4},
@@ -1884,6 +1963,7 @@ int main(int argc, char **argv)
     amiga_set_pc_hook(road_pc_hook);
     bool paused = false, frozen = false, freeze_on_course = false;
 
+    bezel_scaler = UP_NAME[up_mode];
     if (offline) { frozen = true; SetTargetFPS(50); }
     long draws = 0;
     while (!WindowShouldClose() && !(!offline && amiga_stopped())) {
@@ -1895,6 +1975,10 @@ int main(int argc, char **argv)
         if (IsKeyPressed(KEY_F11)) ToggleFullscreen();
         if (IsKeyPressed(KEY_ONE))   mode = MODE_GAME;
         if (IsKeyPressed(KEY_TWO))   mode = MODE_COURSE;
+        if (IsKeyPressed(KEY_F3)) {
+            up_mode = (up_mode + 1) % UP_COUNT;
+            bezel_scaler = UP_NAME[up_mode];
+        }
         if (IsKeyPressed(KEY_THREE)) mode = MODE_GFX;
         if (IsKeyPressed(KEY_FOUR))  mode = MODE_SOUND;
         /* D from the play screen, or the panel's DEBUG button */

@@ -14,6 +14,8 @@
 #include <string.h>
 #include "bezel.h"
 
+const char *bezel_scaler = "SHARP";
+
 static Font  ui_font;
 static int   ui_font_ok;
 static Texture2D logo;
@@ -110,7 +112,7 @@ int bezel_panels(Bezel *b, int fps, int natives, int want_debug_btn,
         const int reserve = side ? right_reserve : 0;
         const int py = (int)p.y + reserve, ph = (int)p.height - reserve;
         Color hue = side ? P2HUE : P1HUE;
-        char fpsbuf[32], natbuf[40];
+        char fpsbuf[32], natbuf[40], scalebuf[48];
         snprintf(fpsbuf, sizeof fpsbuf, "%d FPS", fps);
         snprintf(natbuf, sizeof natbuf, "%d ROUTINES NATIVE C", natives);
 
@@ -145,6 +147,9 @@ int bezel_panels(Bezel *b, int fps, int natives, int want_debug_btn,
             ROW("X        COURSE PREVIEW", 0, hue);
             ROW("         (pad X too)", 0, BODYHUE);
             ROW("F11      FULLSCREEN", 0, BODYHUE);
+            snprintf(scalebuf, sizeof scalebuf, "F3       SCALER: %s",
+                     bezel_scaler);
+            ROW(scalebuf, 0, BODYHUE);
             ROW("P        PAUSE", 0, BODYHUE);
             ROW("F2       SCREENSHOT", 0, BODYHUE);
             ROW("ESC      QUIT", 0, BODYHUE);
