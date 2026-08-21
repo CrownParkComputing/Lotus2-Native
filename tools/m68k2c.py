@@ -392,20 +392,30 @@ def emit(ins):
     if m in ('mulu', 'muls'):
         s = src()
         r = lo[1].r
+        # Data-dependent on a 68000, and Musashi (our oracle) implements
+        # it exactly: MULU adds 2 cycles per set bit of the source, MULS
+        # 2 per 0->1 or 1->0 transition scanning up from bit 0.  A single
+        # measured mean cannot express that -- `mulu.w D6,D1` measured 45,
+        # which is not even a legal MULU timing -- and the error drifts
+        # the CPU against the chipset.  So charge base + the real count.
+        # The base is 38 plus the standard word EA time, confirmed against
+        # the measurement: mulu.w #$2a,D0 is 38 + 4 + 2*popcount($2a)=3,
+        # which is 48, exactly what the oracle recorded.
+        ea_cost = {'d': 0, 'a': 0, 'imm': 4, 'ind': 4, 'post': 4,
+                   'pre': 6, 'd16': 8, 'idx': 10, 'abs': 12}.get(lo[0].kind, 8)
+        out.append('{ uint16_t sw_ = (uint16_t)(%s); unsigned k_ = 0;' % s)
+        if m == 'mulu':
+            out.append('  for (uint16_t y_ = sw_; y_; y_ >>= 1) if (y_ & 1) k_ += 2;')
+        else:
+            out.append('  { unsigned f_ = 0; for (uint16_t y_ = sw_; y_; y_ >>= 1)'
+                       ' { if ((y_ & 1) != f_) { k_ += 2; f_ = 1 - f_; } } }')
+        out.append('  m->cycles += %d + k_; }' % (38 + ea_cost))
         # NOTE: mulu/muls/divu/divs are data-dependent on real hardware,
         # but the measured edge already carries the cost this game's
         # operands actually produce -- a hand-written 38 + 2*bitcount came
         # out four cycles light against the oracle every time.  Measure,
         # do not model.
-        out.append('{ uint16_t sw_ = (uint16_t)(%s); unsigned k_ = 0;' % s)
-        if m == 'mulu':
-            out.append('  for (int b_ = 0; b_ < 16; b_++) if ((sw_ >> b_) & 1) k_++;')
-        else:
-            out.append('  unsigned pv_ = 0;'
-                       ' for (int b_ = 0; b_ < 16; b_++)'
-                       ' { unsigned cb_ = (sw_ >> b_) & 1;'
-                       '   if (cb_ != pv_) k_++; pv_ = cb_; }')
-        out.append('  (void)k_; }')
+
         if m == 'mulu':
             out.append('m->d[%d] = (uint32_t)((uint16_t)%s) * (uint32_t)(uint16_t)m->d[%d];'
                        % (r, s, r))
@@ -957,6 +967,8 @@ def main():
         # per-edge costs for the two-way instructions
         ins.cyc_taken = ins.cyc_fall = 0
         base = ins.mnem
+        if base in ('mulu', 'muls'):
+            ins.cycles = 0          # the emitted formula charges it
 
         if (base in COND or base.startswith('db')) and ins.ops:
             tgt = lower(ins.ops[-1])
