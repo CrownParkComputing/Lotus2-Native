@@ -416,7 +416,7 @@ test: selftest boot-test
 clean:
 	rm -rf build
 
-.PHONY: play-min storm-snaps verify-storm verify-blitq course-snaps course-gate replay-gate override-check frame-gate debug coherence play no-musashi decode-check recomp recomp-gate statelog trace pcset drive all native boot-test selftest oracle test clean gate-capture road-capture render-gate view view-race track course
+.PHONY: play-min scen-snaps storm-snaps verify-storm verify-blitq course-snaps course-gate replay-gate override-check frame-gate debug coherence play no-musashi decode-check recomp recomp-gate statelog trace pcset drive all native boot-test selftest oracle test clean gate-capture road-capture render-gate view view-race track course
 
 # Per-course race snapshots for the viewer's ROAD VIEW.  Each is a real
 # race in that course, reached by replaying the password session that
@@ -456,6 +456,19 @@ verify-storm: build/lotus2_native
 
 # Does the native queue runner parse the real queue the way the real
 # drain did?  Needs the drain snapshot from make storm-snaps.
+# Entry/exit pairs for the scenery scheduler's call sites (re/SCENERY.md).
+scen-snaps: build/lotus2_recomp
+	mkdir -p re/pipeline/scen
+	@for p in 215bf8,215bfc:e2_ 215236,21523a:bc_ 2152ac,2152b0:d1_ \
+	          215270,215274:c3_ 215c5a,215c5e:dc_; do \
+		pcs=$${p%%:*}; pre=$${p##*:}; \
+		SWIV_SNAP_PCS=$$pcs SWIV_SNAP_FROM=5600 SWIV_SNAP_MAX=2 \
+		SWIV_SNAP_PREFIX=re/pipeline/scen/$$pre \
+		./build/lotus2_recomp --dir $(INSTALL) --fire-from 2100 \
+			--fire-period 100 --frames 5610 >/dev/null 2>&1; \
+		echo "scen-snaps: $$pcs"; \
+	done
+
 verify-blitq: build/lotus2_native
 	./build/lotus2_native --verify-blitq
 

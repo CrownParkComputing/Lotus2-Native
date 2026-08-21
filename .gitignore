@@ -45,3 +45,4 @@ re/pipeline/*.l2c
 re/pipeline/track_*.csv
 re/pipeline/track_*.svg
 re/pipeline/storm/*.bin
+re/pipeline/scen/*.bin
