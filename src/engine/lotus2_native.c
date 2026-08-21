@@ -341,7 +341,14 @@ static void stage_input_read(Game *g) { input_read(g, &stage_input); }
 
 /* $211e78: the car model, run on the near view block */
 static void stage_car(Game *g) { car_update(g, A3_BASE + 0x3054); }
-static void stage_checkpoint(Game *g) { car_checkpoint(g, A3_BASE + 0x3054); }
+static void stage_checkpoint(Game *g)
+{
+    Regs r;
+    for (int i = 0; i < 8; i++) { r.d[i] = stage_d[i]; r.a[i] = stage_a[i]; }
+    car_checkpoint_regs(g, &r);
+    stage_expect(0, r.d[0]); stage_expect(1, r.d[1]);
+    stage_expect(7, r.d[7]); stage_expect(8 + 0, r.a[0]);
+}
 static void stage_clock(Game *g) { car_clock(g, A3_BASE + 0x3054); }
 static void stage_distance(Game *g)
 {

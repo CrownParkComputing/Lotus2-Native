@@ -133,6 +133,7 @@ void car_clock(Game *g, uint32_t view);        /* $21263c */
 void car_distance(Game *g, uint32_t view, uint32_t *regs); /* $212662; D0,D1 */
 void car_shape(Game *g, uint32_t view);        /* $212ba4 */
 void car_shape_regs(Game *g, Regs *r);         /* $212ba4, registers too */
+void car_checkpoint_regs(Game *g, Regs *r);    /* $212680, registers too */
 void car_drive(Game *g, uint32_t view);        /* $212734 */
 void car_tick(Game *g, uint32_t view);         /* $21270a */
 uint32_t car_frame_latch(Game *g);             /* $211dd4; returns A1 */

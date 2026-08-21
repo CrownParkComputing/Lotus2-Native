@@ -64,8 +64,16 @@ static void ret(M68K *m, unsigned cycles)
 /* ---- the car model ($211e74's chain) ---- */
 __attribute__((unused)) static int ov_car_update(M68K *m)
 { Game g = game_view(); car_update(&g, m->a[4]); ret(m, 970); return 1; }
-__attribute__((unused)) static int ov_car_checkpoint(M68K *m)
-{ Game g = game_view(); car_checkpoint(&g, m->a[4]); ret(m, 189); return 1; }
+static int ov_car_checkpoint(M68K *m)
+{
+    Game g = game_view();
+    Regs r;
+    for (int i = 0; i < 8; i++) { r.d[i] = m->d[i]; r.a[i] = m->a[i]; }
+    car_checkpoint_regs(&g, &r);
+    m->d[0] = r.d[0]; m->d[1] = r.d[1]; m->d[7] = r.d[7]; m->a[0] = r.a[0];
+    ret(m, 189);
+    return 1;
+}
 static int ov_car_clock(M68K *m)
 { Game g = game_view(); car_clock(&g, m->a[4]); ret(m, 107); return 1; }
 static int ov_car_distance(M68K *m)
@@ -174,6 +182,7 @@ static struct { uint32_t pc; NativeFn fn; const char *name; } table[] = {
     { 0x215b58, ov_scen_sort,       "scen_sort" },
     { 0x212662, ov_car_distance,    "car_distance" },
     { 0x212ba4, ov_car_shape,       "car_shape" },
+    { 0x212680, ov_car_checkpoint,  "car_checkpoint" },
 };
 #define NOVERRIDE ((int)(sizeof table / sizeof table[0]))
 

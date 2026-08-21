@@ -753,3 +753,57 @@ void car_shape_regs(Game *g, Regs *r)
     r->d[4] = d4; r->d[5] = d5; r->d[6] = d6; r->d[7] = d7;
     r->a[0] = a0;
 }
+
+/* ---- $212680 with full register semantics ----
+ *
+ * Same job as car_checkpoint(), plus the registers the routine leaves:
+ * D0, D1, D7 and A0.  D0 is the awkward one -- it is written at three
+ * different widths on the way through (a word from the course record, a
+ * long when a checkpoint tops the time up, then a BYTE from the record's
+ * tail) and each write preserves the bits above it, so its final value
+ * carries pieces of all three.
+ */
+void car_checkpoint_regs(Game *g, Regs *r)
+{
+    const uint32_t a4 = r->a[4];
+    uint32_t d7 = f32(g, a4 + 0x08);
+    d7 = (d7 >> 16) | (d7 << 16);                   /* swap */
+    d7 = setw(d7, (uint16_t)(w(d7) << 4));          /* asl.w #4 */
+    const uint32_t a0 = A3 - 0x1e78;
+    const uint32_t rec = (uint32_t)(int32_t)(int16_t)w(d7);
+
+    uint32_t d0 = setw(r->d[0], f16(g, a0 + 2 + rec));
+    uint32_t d1 = setw(r->d[1], (uint16_t)(w(d0) & 0xff00));
+    d0 = setw(d0, (uint16_t)(w(d0) - w(d1)));
+
+    if (w(d1) == 0x7a00) {                          /* checkpoint */
+        if (f16(g, a4 + 0x18) == 0) {
+            pf32(g, a4 + 0x2e, f32(g, a4 + 0x2e) + 0x30d40);
+            pf16(g, a4 + 0xa8, 0x80);
+            if (f16(g, A3 + 0x3038) == 2) d0 = 0;   /* moveq: all 32 */
+            d0 = (d0 >> 16) | (d0 << 16);           /* swap */
+            d0 = setw(d0, 0);                       /* clr.w */
+            d0 = d0 + f32(g, a4 + 0x20);            /* add.l */
+            if (d0 >= 0x640000u) d0 = 0x630031u;    /* bcs skips */
+            pf32(g, a4 + 0x20, d0);
+            pf16(g, a4 + 0x18, 1);
+            pf16(g, a4 + 0x1a, 0);
+        }
+    } else {
+        pf16(g, a4 + 0x18, 0);
+    }
+
+    d0 = setw(d0, (uint16_t)(f16(g, a0 + 0xa + rec) & 0x8000));
+    d0 = setw(d0, (uint16_t)((w(d0) << 1) | (w(d0) >> 15)));   /* rol.w #1 */
+    pf16(g, a4 + 0x24, w(d0));
+
+    /* move.b writes ONE byte; the rest of D0 survives */
+    d0 = (d0 & 0xffffff00u) | g->fast[(a0 + 0x72 + rec) - GUEST_FAST_ADDR];
+    if ((uint8_t)d0 == 0xfc) {
+        d0 = (d0 & 0xffffff00u) | g->fast[(a0 + 0x73 + rec) - GUEST_FAST_ADDR];
+        d0 = setw(d0, (uint16_t)(int16_t)(int8_t)(uint8_t)d0);   /* ext.w */
+        pf16(g, a4 + 0xb6, w(d0));
+    }
+
+    r->d[0] = d0; r->d[1] = d1; r->d[7] = d7; r->a[0] = a0;
+}
