@@ -340,7 +340,15 @@ static void stage_frame_begin(Game *g)
 static void stage_input_read(Game *g) { input_read(g, &stage_input); }
 
 /* $211e78: the car model, run on the near view block */
-static void stage_car(Game *g) { car_update(g, A3_BASE + 0x3054); }
+static void stage_car(Game *g)
+{
+    Regs r;
+    for (int i = 0; i < 8; i++) { r.d[i] = stage_d[i]; r.a[i] = stage_a[i]; }
+    car_update_regs(g, &r);
+    stage_expect(0, r.d[0]); stage_expect(1, r.d[1]);
+    stage_expect(3, r.d[3]); stage_expect(4, r.d[4]);
+    stage_expect(7, r.d[7]); stage_expect(8 + 0, r.a[0]);
+}
 /* $20d7e8 via the engine-note call site at $212a76.  Its only register
  * effect is D0; everything else is saved and restored by its movem. */
 static void stage_claim_voice(Game *g)

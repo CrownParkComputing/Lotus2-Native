@@ -22,6 +22,7 @@
  */
 #include <string.h>
 #include "amiga.h"
+#include "cpu.h"
 #include "m68krt.h"
 #include "engine.h"
 
@@ -29,9 +30,16 @@
 #define VIEW (A3 + 0x3054)
 
 /* the engine reads guest memory through the same windows the host uses */
+/* The engine's optional chipset write, pointed at the host.  Without it a
+ * port that replaces a routine silently drops that routine's custom
+ * register writes -- car_update sets AUDxVOL and clears a DMACON bit. */
+static void poke_custom(uint32_t addr, uint16_t value)
+{ m68k_write_memory_16(addr, value); }
+
 static Game game_view(void)
 {
     Game g = {0};
+    g.poke = poke_custom;
     g.chip = chip;
     g.fast = fast;
     g.base = fast + (GUEST_BASE_ADDR - GUEST_FAST_ADDR);
@@ -62,8 +70,30 @@ static void ret(M68K *m, unsigned cycles)
  */
 
 /* ---- the car model ($211e74's chain) ---- */
+/* NOT in the table.  car_update is register-complete and gates EXACT, but
+ * an override charges ONE cycle figure and this routine does not have
+ * one: 970 cycles a call on FOREST, 768 on STORM.  Billing storm at the
+ * forest figure is 202 cycles too many across 1764 calls -- about 1.6
+ * frames of drift over a run -- and it measurably moved storm from 23/25
+ * to 17/25 while every other course stayed exact.  A swap that makes a
+ * course worse does not go in.
+ *
+ * This is a limit of the mechanism, not of the port.  Every routine
+ * measured varies by course to some degree (sfx_claim_voice 354 -> 597,
+ * scen_sort 410 -> 511, span_fill 1022 -> 1210); car_update is simply
+ * heavy enough and called often enough for it to matter.  Charging a
+ * cost that depends on the path taken is what would let it in. */
 __attribute__((unused)) static int ov_car_update(M68K *m)
-{ Game g = game_view(); car_update(&g, m->a[4]); ret(m, 970); return 1; }
+{
+    Game g = game_view();
+    Regs r;
+    for (int i = 0; i < 8; i++) { r.d[i] = m->d[i]; r.a[i] = m->a[i]; }
+    car_update_regs(&g, &r);
+    m->d[0] = r.d[0]; m->d[1] = r.d[1]; m->d[3] = r.d[3];
+    m->d[4] = r.d[4]; m->d[7] = r.d[7]; m->a[0] = r.a[0];
+    ret(m, 970);
+    return 1;
+}
 static int ov_car_checkpoint(M68K *m)
 {
     Game g = game_view();

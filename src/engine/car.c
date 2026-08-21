@@ -22,32 +22,26 @@
 static int32_t muls_w(uint16_t a, uint16_t b)
 { return (int32_t)(int16_t)a * (int16_t)b; }
 
-/* NOT override-eligible yet: the registers are not modelled.
+/* ---- $2129f2 with full register semantics ----
  *
- * The port below is complete as to memory (and, since $20d7e8 was
- * ported, as to the voice claim it used to skip).  What it does not do
- * is hand back D0, D1, D3, D4, D7 and A0, which is the remaining
- * condition -- see tools/override_check.py.
- *
- * The survey, so it does not have to be redone:
- *
- *   The routine has ONE exit, at $212ba2, so every path converges and
- *   the tail from $212b7a is common.  That tail settles most of it:
- *     D0  low word is the engine note written to $c8(A4); the upper half
- *         is whatever D0 held before $212b7e
- *     D3  the surface value written to $ca(A4)
- *     D4  the surface nibble, tested by cmp.w #$2,D4 at $212b42
- *     D7  the car position, loaded as a long at the top
- *     D1  only touched on the rumble path ($212b5e-$212b78)
- *     A0  $2438(A3) if the rumble path ran, otherwise whatever an
- *         earlier lea left -- so it is path-dependent and is the one
- *         that actually needs tracing rather than reading off the tail
+ * One exit, at $212ba2, so every path converges and the common tail from
+ * $212b7a settles most of the register file.  The reuse is what makes it
+ * fiddly: D4 carries the speed until $212b1a writes it back, then is
+ * immediately reloaded with the surface nibble -- keeping the swapped
+ * speed's upper half, because `move.w ($a,A0,D0.w),D4` writes only the
+ * low word.  D0 is recycled four times over.  A0 is $-1e78(A3) unless the
+ * rumble path ran, which leaves $2438(A3).
  */
-void car_update(Game *g, uint32_t a4)
+void car_update_regs(Game *g, Regs *r)
 {
+    const uint32_t a4 = r->a[4];
+    uint32_t rd0 = r->d[0], rd1 = r->d[1], rd3 = r->d[3];
+    uint32_t rd4, rd7, ra0;
+
     uint32_t d4 = f32(g, a4 + 0x04);            /* speed */
     uint32_t d7 = f32(g, a4 + 0x00);            /* position */
     uint16_t d0 = f16(g, a4 + 0xce);            /* per-frame delta */
+    rd0 = (uint32_t)(int32_t)(int16_t)d0;       /* ext.l D0 */
     int32_t d0l = (int32_t)(int16_t)d0;         /* ext.l */
     if (d0l >= 0) d7 += (uint32_t)d0l;          /* bmi skips the add */
     pf32(g, a4 + 0x00, d7);                     /* <- the root write */
@@ -67,10 +61,11 @@ void car_update(Game *g, uint32_t a4)
         }
     }
 
-    int32_t d1l = muls_w(d0, f16(g, a4 + 0x10));
+    int32_t d1l = muls_w(d0, f16(g, a4 + 0x10));   /* $212a28 muls.w -> D1 */
     d4 += (uint32_t)d1l;
-    d1l <<= 2;
+    d1l <<= 2;                                     /* $212a2e asl.l #2,D1 */
     d4 += (uint32_t)d1l;
+    rd1 = (uint32_t)d1l;
 
     /* ---- engine sound channel ($212a32-$212ae2) ---- */
     if (f16(g, A3 + 0x2dec) == 0) {
@@ -78,12 +73,14 @@ void car_update(Game *g, uint32_t a4)
         if (f16(g, a4 + 0x1a) != 0) to_release = 1;
         else if (f16(g, a4 + 0x0e) != 0 && f16(g, a4 + 0xc4) != 0) {
             d1l = -1;
+            rd1 = (uint32_t)d1l;
             to_claim = 1;
         } else {
             d1l = muls_w((uint16_t)(f16(g, a4 + 0x0e) - d0),
                          f16(g, a4 + 0x10));
             if (d1l < 0) d1l = -d1l;
             d1l -= 0x8000;
+            rd1 = (uint32_t)d1l;
             if (d1l < 0) to_release = 1;
             else to_claim = 1;
         }
@@ -105,26 +102,38 @@ void car_update(Game *g, uint32_t a4)
                 uint16_t v = f16(g, a4 + 0xb2);
                 /* lsr.w #8: a LOGICAL shift of the low word only, so a
                  * negative d1 becomes $00ff here, not $ffff */
-                uint16_t vol = (uint16_t)((uint16_t)d1l >> 8);
-                if ((int16_t)vol >= 0x40) vol = 0x40;
+                /* $212a8c lsr.w #8,D1 modifies D1 itself, and the clamp
+                 * at $212a94 is a moveq -- all 32 bits */
+                rd1 = setw(rd1, (uint16_t)((uint16_t)d1l >> 8));
+                uint16_t vol = w(rd1);
+                if ((int16_t)vol >= 0x40) { vol = 0x40; rd1 = 0x40; }
                 pf16(g, a4 + 0xb4, vol);
-                (void)v;                        /* AUDxVOL write: no audio */
+                /* $212aa2: move.w D0,($a8,A0), A0 = $dff000 + voice*16 */
+                if (f16(g, A3 + 0x2f56) == 0 && g->poke)
+                    g->poke(0xdff0a8u + ((uint32_t)(uint16_t)(v << 4)), vol);
             }
         }
         if (to_release) {                       /* $212aa8 */
             uint16_t v = f16(g, a4 + 0xb2);
             if ((int16_t)v >= 0) {
+                /* $212ac0: clr.w ($a8,A0) before the slot is released */
+                if (f16(g, A3 + 0x2f56) == 0 && g->poke)
+                    g->poke(0xdff0a8u + ((uint32_t)(uint16_t)(v << 4)), 0);
                 pf16(g, a4 + 0xb2, 0xffff);
                 pf16(g, a4 + 0xb4, 0);
                 uint32_t p = A3 + 0x2ca2 + (uint32_t)(uint16_t)(v + v);
                 pf16(g, p, 0xfffe);
-                /* DMACON bit clear: no audio model */
+                /* $212ae0: move.w D0,($96,A6) -- clear this channel's DMA */
+                if (g->poke) g->poke(0xdff096u, (uint16_t)(1u << (v & 15)));
             }
         }
     }
 
     /* ---- speed accumulation ($212ae4) ---- */
     uint16_t t = f16(g, a4 + 0x12);
+    /* $212ae8 move.w D0,D1 -- D1 is overwritten here, so nothing the
+     * sound block left in it survives to the rts */
+    rd1 = setw(rd1, t);
     uint16_t s = (uint16_t)(t + t + t);
     s = (uint16_t)(s + s);
     s = (uint16_t)(s + s);
@@ -144,6 +153,11 @@ void car_update(Game *g, uint32_t a4)
         d4 = (sw >> 16) | (sw << 16);
         pf32(g, a4 + 0x04, d4);
     }
+    /* $212b18 swaps D4 and $212b1a stores it, so the register holds
+     * exactly what went to memory when the surface later overwrites its
+     * low word.  The port's `sw` is the pre-swap register; its `d4` is
+     * the post-swap one, which is the value wanted here. */
+    uint32_t rd4_speed_swapped = d4;
 
     /* ---- surface under the car, from the course table ($212b1e) ---- */
     uint16_t d3 = 0;
@@ -157,6 +171,8 @@ void car_update(Game *g, uint32_t a4)
     surf = (uint16_t)(surf >> lat);
     surf = (uint16_t)(surf & 0xf);
 
+    ra0 = A3 - 0x1e78;                          /* lea at $212b26 */
+    rd4 = setw(rd4_speed_swapped, surf);        /* D4 reloaded, low word */
     int rumble = 0;
     if (surf == 2) rumble = 1;
     else if (f16(g, A3 + 0x2dea) != 0 && surf == 1) {
@@ -167,9 +183,11 @@ void car_update(Game *g, uint32_t a4)
         uint16_t v = f16(g, a4 + 0x04);
         v = (uint16_t)(v + 0x200);
         v = (uint16_t)(v >> 4);
-        uint8_t b = g->fast[(A3 + 0x2438 + (int16_t)v) - GUEST_FAST_ADDR];
+        ra0 = A3 + 0x2438;                      /* lea at $212b68 */
+        uint8_t b = g->fast[(ra0 + (int16_t)v) - GUEST_FAST_ADDR];
         uint16_t d1w = (uint16_t)(b + b);
         d1w = (uint16_t)(d1w << 8);
+        rd1 = setw(rd1, d1w);
         if ((int16_t)(d1w - d3) >= 0) d3 = d1w;   /* bmi skips */
     }
     pf16(g, a4 + 0xca, d3);
@@ -186,7 +204,21 @@ void car_update(Game *g, uint32_t a4)
         }
     }
     pf16(g, a4 + 0xc8, note);
+
+    rd0 = setw(rd0, note);                      /* $212b9e writes D0 */
+    rd3 = d3;              /* moveq #$0,D3 zeroed all 32 bits */
+    rd7 = d7;
+    r->d[0] = rd0; r->d[1] = rd1; r->d[3] = rd3;
+    r->d[4] = rd4; r->d[7] = rd7; r->a[0] = ra0;
 }
+
+void car_update(Game *g, uint32_t a4)
+{
+    Regs r = {{0}, {0}};
+    r.a[4] = a4;
+    car_update_regs(g, &r);
+}
+
 
 /* $212680-$212708 [snapshot-verified]
  *

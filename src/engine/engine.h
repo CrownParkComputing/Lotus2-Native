@@ -70,6 +70,14 @@ typedef struct {
 } Input;
 
 typedef struct {
+    /* Optional chipset write.  The ports were built against flat memory
+     * images, where a write to a custom register has nowhere to go, so
+     * several were simply left out -- AUDxVOL and DMACON among them.
+     * That is fine for a snapshot gate and wrong the moment a port
+     * REPLACES the routine, because the game stops setting channel
+     * volumes.  NULL keeps the old behaviour for the offline harness;
+     * the native build points it at the host's chipset. */
+    void (*poke)(uint32_t addr, uint16_t value);
     uint8_t *chip;   /* guest chip RAM image (GUEST_CHIP_SIZE) */
     uint8_t *base;   /* guest base page window ($208000, GUEST_BASE_SIZE) */
     uint8_t *fast;   /* full ExpMem image ($200000+GUEST_FAST_SIZE) or NULL;
@@ -146,6 +154,7 @@ void car_checkpoint(Game *g, uint32_t view);   /* $212680 */
 void car_clock(Game *g, uint32_t view);        /* $21263c */
 void car_distance(Game *g, uint32_t view, uint32_t *regs); /* $212662; D0,D1 */
 void car_shape(Game *g, uint32_t view);        /* $212ba4 */
+void car_update_regs(Game *g, Regs *r);        /* $2129f2, registers too */
 void car_shape_regs(Game *g, Regs *r);         /* $212ba4, registers too */
 void car_checkpoint_regs(Game *g, Regs *r);    /* $212680, registers too */
 uint32_t sfx_claim_voice(Game *g, uint32_t d0); /* $20d7e8; returns D0 */
