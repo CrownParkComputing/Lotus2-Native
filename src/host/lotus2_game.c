@@ -71,6 +71,20 @@ int main(int argc, char **argv)
     SetAudioStreamBufferSizeDefault(FRAME_SAMPLES);
     AudioStream stream = LoadAudioStream(AUDIO_RATE, 16, 2);
     PlayAudioStream(stream);
+    /* Prime with a little silence so the first real audio is not racing
+     * an already-empty device. */
+    {
+        static int16_t quiet[FRAME_SAMPLES * 2];
+        for (int i = 0; i < 3 && IsAudioStreamProcessed(stream); i++)
+            UpdateAudioStream(stream, quiet, FRAME_SAMPLES);
+    }
+    /* Prime the device with a little silence so the first frames of real
+     * audio are not racing an already-empty buffer. */
+    {
+        static int16_t quiet[FRAME_SAMPLES * 2];
+        for (int i = 0; i < 3 && IsAudioStreamProcessed(stream); i++)
+            UpdateAudioStream(stream, quiet, FRAME_SAMPLES);
+    }
 
     Image image = { .data = framebuf, .width = SCREEN_W, .height = SCREEN_H,
                     .mipmaps = 1, .format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8 };
@@ -105,8 +119,15 @@ int main(int argc, char **argv)
              * chipset's side -- channels on, periods and volumes set, and
              * nothing coming out. */
             amiga_audio_frame();
-            if (IsAudioStreamProcessed(stream)) {
-                amiga_audio_pull(mix, FRAME_SAMPLES);   /* zero-fills short */
+            /* Drain every buffer the device will take, not one per video
+             * frame.  Feeding exactly one and only when the stream
+             * happened to be ready left roughly one frame in forty
+             * unqueued: the device starved, and the gap is heard as a
+             * click at a frame boundary. */
+            while (IsAudioStreamProcessed(stream)) {
+                if (amiga_audio_fill() < FRAME_SAMPLES) break;  /* no full
+                            frame ready: better to wait than to feed silence */
+                amiga_audio_pull(mix, FRAME_SAMPLES);
                 UpdateAudioStream(stream, mix, FRAME_SAMPLES);
                 if (wav) fwrite(mix, sizeof(int16_t), FRAME_SAMPLES * 2, wav);
             }
