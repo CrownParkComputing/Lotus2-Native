@@ -101,6 +101,12 @@ __attribute__((unused)) static int ov_car_tick(M68K *m)
 static int ov_car_frame_latch(M68K *m)
 { Game g = game_view(); m->a[1] = car_frame_latch(&g); ret(m, 904); return 1; }
 
+/* $20d7e8: claim a sound voice.  Its only register effect is D0 -- the
+ * movem at the top saves and restores everything else -- so this is the
+ * simplest possible swap. */
+static int ov_claim_voice(M68K *m)
+{ Game g = game_view(); m->d[0] = sfx_claim_voice(&g, m->d[0]); ret(m, 354); return 1; }
+
 /* ---- the scenery iterators ---- */
 __attribute__((unused)) static int ov_scen_next_a2(M68K *m)
 { Game g = game_view(); m->a[2] = scen_next_a2(&g, m->a[2]); ret(m, 166); return 1; }
@@ -183,6 +189,7 @@ static struct { uint32_t pc; NativeFn fn; const char *name; } table[] = {
     { 0x212662, ov_car_distance,    "car_distance" },
     { 0x212ba4, ov_car_shape,       "car_shape" },
     { 0x212680, ov_car_checkpoint,  "car_checkpoint" },
+    { 0x20d7e8, ov_claim_voice,     "sfx_claim_voice" },
 };
 #define NOVERRIDE ((int)(sizeof table / sizeof table[0]))
 
