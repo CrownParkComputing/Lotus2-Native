@@ -280,13 +280,18 @@ static float course_zoom = 1.0f;
 static int course_playing = 0;      /* auto-drive the preview */
 static int course_drive = 1;        /* poke the game to the scrub position */
 static Texture2D game_screen;       /* live game frame, drawn in the 3D pane */
-/* How fast the game itself moves along the course, MEASURED rather than
- * guessed: two race snapshots 100 frames apart put $30d8 at 40.3034 and
- * 41.5498 segments, so 0.01246 segments per frame at a speed word of
- * 425.  Driving the preview at one segment per frame -- which is what it
- * used to do -- is eighty times too fast, and that is why the hills
- * jumped instead of rolling. */
-#define SEG_PER_FRAME 0.01246f
+/* One sixteenth of a segment per frame, which is the smoothest the
+ * renderer can go: $213edc takes the top FOUR BITS of the course
+ * position's fraction, so there are exactly sixteen distinct views
+ * between one course record and the next.  A frame per sub-step means
+ * the picture changes every frame and the road flows.
+ *
+ * It is deliberately not the rate the game itself travels at.  Measured
+ * from race snapshots 100 frames apart, the car covers about 0.0135
+ * segments a frame -- five frames per sub-step, which reads as a still
+ * picture that twitches rather than as driving.  This is a preview, and
+ * it is better for it to move. */
+#define SEG_PER_FRAME (1.0f / 16.0f)
 static float course_speed = SEG_PER_FRAME;
 
 /* Integrate the course into a centreline + height once per frame. */
@@ -1218,7 +1223,6 @@ int native_overrides_count(void);
 
 static void page_game(void)
 {
-    game_debug_clicked = 0;
     if (use_bezel) {
         /* The bezel is laid out in the logical canvas, and the mouse has
          * to be mapped into it too or the button is only clickable where
@@ -1232,9 +1236,9 @@ static void page_game(void)
                                          bz.game.width + 4,
                                          bz.game.height + 4},
                              2, BTN_EDGE);
-        game_debug_clicked = bezel_panels(&bz, GetFPS(),
-                                          native_overrides_count(), 1,
-                                          mpos());
+        if (bezel_panels(&bz, GetFPS(), native_overrides_count(), 1,
+                         mpos()))
+            game_debug_clicked = 1;
         return;
     }
     float s = (float)WIN_W / SCREEN_W;
@@ -1389,7 +1393,13 @@ int main(int argc, char **argv)
         if (IsKeyPressed(KEY_ONE))   mode = MODE_GAME;
         if (IsKeyPressed(KEY_TWO))   mode = MODE_COURSE;
         /* D from the play screen, or the panel's DEBUG button */
-        if (mode == MODE_GAME && (IsKeyPressed(KEY_D) || game_debug_clicked))
+        /* Consume the click.  It is a LATCH set during the draw phase,
+         * and leaving it set meant ESC put you back on the game page and
+         * the stale latch sent you straight out again on the same frame
+         * -- there was no way back. */
+        int want_debug = game_debug_clicked;
+        game_debug_clicked = 0;
+        if (mode == MODE_GAME && (IsKeyPressed(KEY_D) || want_debug))
             mode = MODE_COURSE;
         /* Pad navigation, so the debug pages are reachable without
          * reaching for the keyboard.  The face and shoulder buttons are
