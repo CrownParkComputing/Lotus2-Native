@@ -22,6 +22,27 @@
 static int32_t muls_w(uint16_t a, uint16_t b)
 { return (int32_t)(int16_t)a * (int16_t)b; }
 
+/* NOT override-eligible yet: the registers are not modelled.
+ *
+ * The port below is complete as to memory (and, since $20d7e8 was
+ * ported, as to the voice claim it used to skip).  What it does not do
+ * is hand back D0, D1, D3, D4, D7 and A0, which is the remaining
+ * condition -- see tools/override_check.py.
+ *
+ * The survey, so it does not have to be redone:
+ *
+ *   The routine has ONE exit, at $212ba2, so every path converges and
+ *   the tail from $212b7a is common.  That tail settles most of it:
+ *     D0  low word is the engine note written to $c8(A4); the upper half
+ *         is whatever D0 held before $212b7e
+ *     D3  the surface value written to $ca(A4)
+ *     D4  the surface nibble, tested by cmp.w #$2,D4 at $212b42
+ *     D7  the car position, loaded as a long at the top
+ *     D1  only touched on the rumble path ($212b5e-$212b78)
+ *     A0  $2438(A3) if the rumble path ran, otherwise whatever an
+ *         earlier lea left -- so it is path-dependent and is the one
+ *         that actually needs tracing rather than reading off the tail
+ */
 void car_update(Game *g, uint32_t a4)
 {
     uint32_t d4 = f32(g, a4 + 0x04);            /* speed */
