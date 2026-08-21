@@ -430,6 +430,10 @@ static void road_pc_hook(unsigned int pc)
     if (pc == road_capture_pc) road_grab();
 }
 
+/* Higher-resolution road: defined below, used by the track player. */
+static int hr_on;
+static void road_hires(Game *g);
+
 /* ---- native track player --------------------------------------------
  * The ROAD VIEW runs the GAME'S OWN road pipeline: the ported chain in
  * src/engine/road.c -- the same C the native build races on -- over a
@@ -507,7 +511,8 @@ static void roadplay_load(int course)
     rp_ready = 1;
     rp_course = course;
     snprintf(rp_note, sizeof rp_note,
-             "the game's own road chain in native C  "
+             hr_on ? "the game's own road chain, edges placed exactly  "
+                   : "the game's own road chain in native C  "
              "(the road is drawn live; the skyline is the captured "
              "frame's, moved to the horizon)");
 }
@@ -659,6 +664,38 @@ static void roadplay_draw(float where)
     }
     if (use && composite(rp_g.chip, use, road_img) == 0) {
         road_valid = 1;
+        if (hr_on) road_hires(&rp_g);
+        /* LOTUS2_EDGES: print, for each drawn line, the record the road
+         * chain produced beside the edges that actually came out.  The
+         * mapping from `line` to a screen x is the one thing the
+         * hi-res renderers still need, and it is worth measuring rather
+         * than deriving -- see re/HIRES.md. */
+        if (getenv("LOTUS2_EDGES")) {
+            static int once;
+            if (!once) {
+                once = 1;
+                uint16_t first = f16(&rp_g, A3 + 0x30e4);
+                uint16_t limit = f16(&rp_g, A3 + 0x2eaa);
+                uint32_t rec = A3 - 0x2bd8 + (uint32_t)(first * 2) * 3;
+                fprintf(stderr, "row  line index  left right  centre\n");
+                for (uint16_t ln = first; ln < limit && ln < VIEW_H; ln++) {
+                    uint16_t v = f16(&rp_g, rec);
+                    uint16_t ix = f16(&rp_g, rec + 2);
+                    rec += 6;
+                    /* the road is whatever differs from the verge, which
+                     * is what the row's outermost pixels are */
+                    uint32_t edge = road_img[ln * VIEW_W + 2];
+                    int l = -1, r = -1;
+                    for (int x = 0; x < VIEW_W; x++)
+                        if (road_img[ln * VIEW_W + x] != edge) { l = x; break; }
+                    for (int x = VIEW_W - 1; x >= 0; x--)
+                        if (road_img[ln * VIEW_W + x] != edge) { r = x; break; }
+                    fprintf(stderr, "%3u %5d %5u %5d %5d %7.1f\n", ln,
+                            (int16_t)(0xb1 - v), ix, l, r,
+                            (l >= 0 && r >= 0) ? (l + r) / 2.0 : -1.0);
+                }
+            }
+        }
         return;
     }
     /* No matching list: fall back to the flat-palette decode. */
@@ -942,6 +979,92 @@ static void render_road_frame(int segment)
     road_valid = 1;
 }
 
+/* ---- the road at higher resolution -----------------------------------
+ * MEASURED, not derived.  For every drawn line the road chain leaves a
+ * six-byte record at A3-$2bd8 -- (v, index, band) -- and printing those
+ * beside the edges that actually came out of the 1x render gives the
+ * mapping in one look:
+ *
+ *     row  line index  left right          left + line
+ *     145   118    18   217   252              335
+ *     151   196    45   139   227              335
+ *     168   291   118    44   276              335
+ *
+ * so the road's LEFT edge is at `335 - line`, and its width is twice the
+ * strip index -- which is also why the strips put their gap at offset
+ * 336.  Both edges are therefore known exactly, as numbers, before
+ * anything is drawn.
+ *
+ * The 1x path quantises the left edge to a byte plus a sixteen-step
+ * barrel shift.  This one does not: it places both edges at their true
+ * position in the output buffer and stretches the row's own pixels
+ * between them, so the tarmac, the markings and the kerbs are still the
+ * game's art and the converging edges stop stair-casing.
+ */
+#define HR_SCALE 3
+static uint32_t hr_img[VIEW_W * HR_SCALE * VIEW_H * HR_SCALE];
+static Texture2D hr_tex;
+
+static void road_hires(Game *g)
+{
+    const int W = VIEW_W * HR_SCALE, H = VIEW_H * HR_SCALE;
+    uint16_t first = f16(g, A3 + 0x30e4);
+    uint16_t limit = f16(g, A3 + 0x2eaa);
+    if (limit > VIEW_H) limit = VIEW_H;
+
+    /* the record for each source row, and the edges it implies */
+    static float lo[VIEW_H], hi[VIEW_H];
+    static int have[VIEW_H];
+    for (int i = 0; i < VIEW_H; i++) have[i] = 0;
+    uint32_t rec = A3 - 0x2bd8 + (uint32_t)(first * 2) * 3;
+    for (uint16_t ln = first; ln < limit; ln++) {
+        int16_t line = (int16_t)(0xb1 - f16(g, rec));
+        uint16_t index = f16(g, rec + 2);
+        rec += 6;
+        lo[ln] = 335.0f - line;
+        hi[ln] = lo[ln] + 2.0f * index;
+        have[ln] = 1;
+    }
+
+    for (int y = 0; y < H; y++) {
+        float sy = (float)y / HR_SCALE;
+        int i = (int)sy;
+        if (i > VIEW_H - 1) i = VIEW_H - 1;
+        const uint32_t *row = road_img + i * VIEW_W;
+        uint32_t *out = hr_img + (size_t)y * W;
+
+        if (!have[i]) {                       /* sky, HUD: plain scale */
+            for (int x = 0; x < W; x++) out[x] = row[x / HR_SCALE];
+            continue;
+        }
+        /* where this row's road WAS in the 1x picture, to sample from */
+        int sl = (int)(lo[i] + 0.5f), sr = (int)(hi[i] + 0.5f);
+        if (sl < 0) sl = 0;
+        if (sr > VIEW_W - 1) sr = VIEW_W - 1;
+        /* and where it belongs, to the fraction of a pixel */
+        float t = sy - i;
+        int j = (i + 1 < VIEW_H && have[i + 1]) ? i + 1 : i;
+        float l = lo[i] + (lo[j] - lo[i]) * t;
+        float r = hi[i] + (hi[j] - hi[i]) * t;
+        float span = r - l;
+        if (span < 1.0f) span = 1.0f;
+
+        for (int x = 0; x < W; x++) {
+            float sx = (x + 0.5f) / HR_SCALE;
+            int from;
+            if (sx < l || sx > r) {
+                from = (int)sx;               /* verge and beyond: as drawn */
+            } else {
+                float u = (sx - l) / span;    /* across the road */
+                from = sl + (int)(u * (sr - sl));
+            }
+            if (from < 0) from = 0;
+            if (from > VIEW_W - 1) from = VIEW_W - 1;
+            out[x] = row[from];
+        }
+    }
+}
+
 /* ---- 3D view: the GAME's own road renderer ---------------------------
  * The preview is not a debug approximation -- it is the game's frame.
  * With DRIVE on, the viewer writes the scrub position into the course
@@ -980,10 +1103,26 @@ static void course_draw_3d(Rectangle r)
     Rectangle dst = {inner.x + (inner.width - GAME_W * sc) * 0.5f,
                      inner.y + (inner.height - road_h * sc) * 0.5f,
                      GAME_W * sc, road_h * sc};
-    UpdateTexture(road_tex, road_img);
-    DrawTexturePro(road_tex,
-                   (Rectangle){0, ROAD_CROP, GAME_W, GAME_H - ROAD_CROP},
-                   dst, (Vector2){0, 0}, 0.0f, WHITE);
+    if (hr_on) {
+        if (!hr_tex.id) {
+            Image hi = { .data = hr_img, .width = VIEW_W * HR_SCALE,
+                         .height = VIEW_H * HR_SCALE, .mipmaps = 1,
+                         .format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8 };
+            hr_tex = LoadTextureFromImage(hi);
+            SetTextureFilter(hr_tex, TEXTURE_FILTER_BILINEAR);
+        }
+        UpdateTexture(hr_tex, hr_img);
+        DrawTexturePro(hr_tex,
+                       (Rectangle){0, ROAD_CROP * HR_SCALE,
+                                   GAME_W * HR_SCALE,
+                                   (GAME_H - ROAD_CROP) * HR_SCALE},
+                       dst, (Vector2){0, 0}, 0.0f, WHITE);
+    } else {
+        UpdateTexture(road_tex, road_img);
+        DrawTexturePro(road_tex,
+                       (Rectangle){0, ROAD_CROP, GAME_W, GAME_H - ROAD_CROP},
+                       dst, (Vector2){0, 0}, 0.0f, WHITE);
+    }
     DrawRectangleLinesEx(r, 1, GRID);
 }
 
@@ -1963,6 +2102,7 @@ int main(int argc, char **argv)
     amiga_set_pc_hook(road_pc_hook);
     bool paused = false, frozen = false, freeze_on_course = false;
 
+    hr_on = 1;
     bezel_scaler = UP_NAME[up_mode];
     if (offline) { frozen = true; SetTargetFPS(50); }
     long draws = 0;
@@ -1975,6 +2115,7 @@ int main(int argc, char **argv)
         if (IsKeyPressed(KEY_F11)) ToggleFullscreen();
         if (IsKeyPressed(KEY_ONE))   mode = MODE_GAME;
         if (IsKeyPressed(KEY_TWO))   mode = MODE_COURSE;
+        if (IsKeyPressed(KEY_F4)) hr_on = !hr_on;
         if (IsKeyPressed(KEY_F3)) {
             up_mode = (up_mode + 1) % UP_COUNT;
             bezel_scaler = UP_NAME[up_mode];
