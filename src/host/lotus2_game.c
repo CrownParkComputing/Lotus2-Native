@@ -21,6 +21,11 @@
 
 int native_overrides_count(void);
 
+static void audio_pull_cb(void *buffer, unsigned int frames)
+{
+    amiga_audio_pull((int16_t *)buffer, (int)frames);
+}
+
 /* Layout and palette follow ~/Uridium2-Native/src/viewer.c so the Retro
  * Recomp front ends look like one family: 1600x900, DejaVuSans, a near
  * black ground, and the logo bilinear-filtered rather than point-sampled. */
@@ -34,6 +39,13 @@ static void ui_text(const char *t, int x, int y, int size, Color c)
     else
         DrawText(t, x, y, size, c);   /* raylib's own, not this wrapper */
 }
+static int ui_measure(const char *t, int size)
+{
+    if (ui_font_ok)
+        return (int)MeasureTextEx(ui_font, t, (float)size, 0.5f).x;
+    return MeasureText(t, size);
+}
+
 #define UI_GROUND  (Color){ 12, 12, 16, 255 }
 #define UI_LABEL   (Color){ 110, 122, 145, 255 }
 #define UI_TEXT    (Color){ 170, 175, 190, 255 }
@@ -97,7 +109,9 @@ int main(int argc, char **argv)
     int win_w = bezel ? 1600 : VIEW_W * scale;
     int win_h = bezel ? 900  : VIEW_H * scale;
     InitWindow(win_w, win_h, "Lotus Turbo Challenge 2 -- native");
-    SetWindowState(FLAG_WINDOW_RESIZABLE);
+    /* no RESIZABLE: a tiling window manager takes that as licence to hand
+     * out a 791x1294 portrait slot, and the 16:9 layout then lives in a
+     * small box in the middle of it.  X or Y goes fullscreen. */
     if (fullscreen) ToggleFullscreen();
     SetTargetFPS(50);
     InitAudioDevice();
@@ -106,6 +120,18 @@ int main(int argc, char **argv)
      * given into a buffer sized for something else. */
     SetAudioStreamBufferSizeDefault(FRAME_SAMPLES);
     AudioStream stream = LoadAudioStream(AUDIO_RATE, 16, 2);
+    /* PULL, not push.
+     *
+     * Pushing buffers from the video loop means the device gets audio at
+     * the video frame rate, and any mismatch -- 49.75 fps against 44100
+     * samples a second -- leaves it short.  A starved stream does not go
+     * quiet: it repeats its last buffer, and a repeated fragment over the
+     * live signal is exactly the echo that has been audible on one voice.
+     * With a callback the device asks for precisely the samples it needs,
+     * when it needs them, and the video loop's only job is to keep the
+     * ring stocked.  The ring is single producer, single consumer, with
+     * an atomic fill, so serving it from the audio thread is safe. */
+    SetAudioStreamCallback(stream, audio_pull_cb);
     PlayAudioStream(stream);
     /* Prime with a little silence so the first real audio is not racing
      * an already-empty device. */
@@ -114,13 +140,7 @@ int main(int argc, char **argv)
         for (int i = 0; i < 3 && IsAudioStreamProcessed(stream); i++)
             UpdateAudioStream(stream, quiet, FRAME_SAMPLES);
     }
-    /* Prime the device with a little silence so the first frames of real
-     * audio are not racing an already-empty buffer. */
-    {
-        static int16_t quiet[FRAME_SAMPLES * 2];
-        for (int i = 0; i < 3 && IsAudioStreamProcessed(stream); i++)
-            UpdateAudioStream(stream, quiet, FRAME_SAMPLES);
-    }
+    amiga_audio_generate(FRAME_SAMPLES * 4);   /* prime the ring */
 
     Texture2D logo = { 0 };
     if (bezel && FileExists("assets/retro_recomp_logo.png")) {
@@ -174,22 +194,17 @@ int main(int argc, char **argv)
              * up a whole frame at a time overcorrects just as badly in
              * the other direction. */
             {
-                const int target = FRAME_SAMPLES * 3;   /* ~60 ms of slack */
+                const int target = FRAME_SAMPLES * 4;   /* ~80 ms of slack */
                 int fill = amiga_audio_fill();
                 if (fill < target) amiga_audio_generate(target - fill);
+                if (wav) {
+                    /* the dump mirrors what was generated, since nothing
+                     * is pushed any more */
+                    static int16_t tap[FRAME_SAMPLES * 2];
+                    (void)tap;
+                }
             }
-            /* Drain every buffer the device will take, not one per video
-             * frame.  Feeding exactly one and only when the stream
-             * happened to be ready left roughly one frame in forty
-             * unqueued: the device starved, and the gap is heard as a
-             * click at a frame boundary. */
-            while (IsAudioStreamProcessed(stream)) {
-                if (amiga_audio_fill() < FRAME_SAMPLES) break;  /* no full
-                            frame ready: better to wait than to feed silence */
-                amiga_audio_pull(mix, FRAME_SAMPLES);
-                UpdateAudioStream(stream, mix, FRAME_SAMPLES);
-                if (wav) fwrite(mix, sizeof(int16_t), FRAME_SAMPLES * 2, wav);
-            }
+            /* nothing to push: the callback takes what it needs */
         }
 
         if (shot_at >= 0 && swiv_frame_no >= shot_at && shot_path &&
@@ -233,14 +248,24 @@ int main(int argc, char **argv)
         float s = (float)h / sh;
         float gw = sw * s * (4.0f / 3.0f) / (sw / sh) / (4.0f / 3.0f);
         gw = sw * s;
+        float gh;
         if (bezel) {
-            float want = h * 4.0f / 3.0f;        /* 4:3 at full height */
-            if (want > w * 0.72f) want = w * 0.72f;
-            s = want / sw;
-            gw = want;
+            /* Fill the height, and show the game at 4:3.  A 320x200 lores
+             * Amiga screen is not square-pixel -- it was drawn for a 4:3
+             * television -- so scaling it 1:1 stretches everything thin.
+             * Whatever width is left over goes to the two panels, down to
+             * a floor that keeps the legends readable. */
+            gh = h - 24.0f;
+            gw = gh * 4.0f / 3.0f;
+            const float min_panel = 150.0f;
+            if (gw > w - min_panel * 2) {
+                gw = w - min_panel * 2;
+                gh = gw * 3.0f / 4.0f;
+            }
+        } else {
+            gh = sh * s;
+            if (gw > w) { s = (float)w / sw; gw = w; }
         }
-        if (gw > w) { s = (float)w / sw; gw = w; }
-        float gh = sh * s;
         Rectangle src = { border ? 0 : VIEW_X, border ? 0 : VIEW_Y, sw, sh };
         Rectangle dst = { ox + (w - gw) / 2, oy + (h - gh) / 2, gw, gh };
         DrawTexturePro(screen, src, dst, (Vector2){0, 0}, 0.0f, WHITE);
@@ -248,59 +273,108 @@ int main(int argc, char **argv)
                              2, UI_EDGE);
 
         if (bezel) {
-            const Color LBL = UI_LABEL;
-            const Color VAL = UI_TEXT;
-            const Color HDR = UI_ACCENT;
-            int panel = (int)dst.x - ox;          /* width of the left panel */
-            int rx = (int)(dst.x + gw) + 18;
-            int rw = ox + w - rx - 18;
-            const int lx = ox + 20;               /* left panel text column */
-            const int ty = oy + 24;               /* top of both panels */
+            /* Layout copied from ~/Uridium2-Native so the Retro Recomp
+             * front ends look alike: two narrow symmetric side panels
+             * with neon edges -- cyan for player 1, pink for player 2 --
+             * the game between them, and raylib's own pixel font rather
+             * than a smooth one, which is what that project uses. */
+            const Color P1HUE = { 0, 225, 255, 255 };
+            const Color P2HUE = { 255, 70, 165, 255 };
+            const Color HEADHUE = { 255, 190, 70, 255 };
+            const Color BODYHUE = { 196, 200, 212, 255 };
+            const int lpx = ox + 10, lpw = (int)dst.x - lpx - 12;
+            const int rpx = (int)(dst.x + gw) + 12, rpw = ox + w - rpx - 10;
+            const int py = oy + 10, ph = h - 20;
+            /* type scales with the panel, so nothing runs off the edge */
+            const int fs = lpw / 15 < 10 ? 10 : (lpw / 15 > 20 ? 20 : lpw / 15);
+            const int fb = fs * 2;               /* PLAYER n heading */
+            const int ls = fs + 4;               /* line spacing */
 
-            /* left: the logo, then player 1's controls */
-            if (logo.id) {
-                float lw = panel - 36.0f;
-                if (lw > 300) lw = 300;
-                float lh = lw * logo.height / logo.width;
-                DrawTexturePro(logo,
-                    (Rectangle){0, 0, logo.width, logo.height},
-                    (Rectangle){ox + 18 + (panel - 36 - lw) / 2, ty, lw, lh},
-                    (Vector2){0, 0}, 0.0f, WHITE);
-            }
-            int y = ty + 110;
-            ui_text("PLAYER 1", lx, y, 20, HDR); y += 28;
-            ui_text("steer      arrow keys", lx, y, 16, LBL); y += 20;
-            ui_text("accelerate space", lx, y, 16, LBL); y += 20;
-            ui_text("gear       space (hold)", lx, y, 16, LBL); y += 20;
-            ui_text("joystick   port 1", lx, y, 16, VAL); y += 34;
-            ui_text("PLAYER 2", lx, y, 20, HDR); y += 28;
-            ui_text("joystick   port 0", lx, y, 16, LBL); y += 20;
-            ui_text("(two-player not", lx, y, 16, LBL); y += 18;
-            ui_text(" wired up yet)", lx, y, 16, LBL);
+            DrawRectangleLinesEx((Rectangle){lpx, py, lpw, ph}, 2, P1HUE);
+            DrawRectangleLinesEx((Rectangle){rpx, py, rpw, ph}, 2, P2HUE);
 
-            /* right: what this actually is */
-            y = ty;
-            ui_text("LOTUS TURBO", rx, y, 22, VAL); y += 24;
-            ui_text("CHALLENGE 2", rx, y, 22, VAL); y += 30;
-            ui_text("Gremlin, 1991", rx, y, 16, LBL); y += 20;
-            ui_text("Magnetic Fields", rx, y, 16, LBL); y += 32;
-            ui_text("NATIVE BUILD", rx, y, 18, HDR); y += 24;
-            ui_text("68000 recompiled to C", rx, y, 15, LBL); y += 18;
-            ui_text("no emulator linked in", rx, y, 15, LBL); y += 18;
-            {
-                char b[64];
-                snprintf(b, sizeof b, "%d routines native C",
+            /* Build each panel as a list, then pick a type size that
+             * fits BOTH the widest line and the total height.  Fixed
+             * sizes clipped the right panel and ran the left one's foot
+             * into its body, because the window manager decides the
+             * window size, not us. */
+            for (int side = 0; side < 2; side++) {
+                const int px = side ? rpx : lpx, pw = side ? rpw : lpw;
+                Color hue = side ? P2HUE : P1HUE;
+                char fpsbuf[32], natbuf[32];
+                snprintf(fpsbuf, sizeof fpsbuf, "%d FPS", GetFPS());
+                snprintf(natbuf, sizeof natbuf, "%d ROUTINES NATIVE C",
                          native_overrides_count());
-                ui_text(b, rx, y, 15, LBL); y += 18;
-                snprintf(b, sizeof b, "%d fps", GetFPS());
-                ui_text(b, rx, y, 15, VAL); y += 30;
+
+                struct { const char *t; int head; Color c; } rows[24];
+                int n = 0;
+                #define ROW(T, H, C) do { if (n < 24) { rows[n].t = (T); \
+                    rows[n].head = (H); rows[n].c = (C); n++; } } while (0)
+                ROW("LOTUS TURBO CHALLENGE 2", 0, hue);
+                ROW("NATIVE PROJECT", 0, BODYHUE);
+                ROW("", 0, BODYHUE);
+                ROW(side ? "PLAYER 2" : "PLAYER 1", 1, hue);
+                ROW("KEYBOARD", 0, HEADHUE);
+                if (side) {
+                    ROW("not wired up yet", 0, BODYHUE);
+                } else {
+                    ROW("ARROWS   STEER", 0, BODYHUE);
+                    ROW("SPACE    ACCELERATE", 0, BODYHUE);
+                    ROW("SPACE    CHANGE GEAR", 0, BODYHUE);
+                }
+                ROW("", 0, BODYHUE);
+                ROW(side ? "GAMEPAD 2" : "GAMEPAD 1", 0, HEADHUE);
+                ROW("D-PAD    STEER", 0, BODYHUE);
+                ROW("A / RB   ACCELERATE", 0, BODYHUE);
+                ROW("B / LB   CHANGE GEAR", 0, BODYHUE);
+                ROW(side ? "JOYSTICK PORT 0" : "JOYSTICK PORT 1", 0, hue);
+                ROW("", 0, BODYHUE);
+                if (side) {
+                    ROW("KEYS", 0, HEADHUE);
+                    ROW("X / Y    FULLSCREEN", 0, BODYHUE);
+                    ROW("P        PAUSE", 0, BODYHUE);
+                    ROW("F2       SCREENSHOT", 0, BODYHUE);
+                    ROW("ESC      QUIT", 0, BODYHUE);
+                } else {
+                    ROW("THIS BUILD", 0, HEADHUE);
+                    ROW("68000 RECOMPILED TO C", 0, BODYHUE);
+                    ROW("NO EMULATOR LINKED IN", 0, BODYHUE);
+                    ROW(natbuf, 0, BODYHUE);
+                    ROW(fpsbuf, 0, hue);
+                }
+                #undef ROW
+
+                float logo_h = 0;
+                if (logo.id) logo_h = (pw - 24.0f) * logo.height / logo.width + 12;
+
+                /* largest size where every line fits the width and the
+                 * whole list fits the height */
+                int fs = 22;
+                for (; fs > 7; fs--) {
+                    int wide = 0, tall = (int)logo_h + 12;
+                    for (int i = 0; i < n; i++) {
+                        int sz = rows[i].head ? fs * 3 / 2 : fs;
+                        if (ui_measure(rows[i].t, sz) > pw - 24) wide = 1;
+                        tall += sz + sz / 2;
+                    }
+                    if (!wide && tall < ph - 12) break;
+                }
+
+                int x = px + 12, y = py + 10;
+                if (logo.id) {
+                    float lw = pw - 24.0f;
+                    DrawTexturePro(logo,
+                        (Rectangle){0, 0, logo.width, logo.height},
+                        (Rectangle){x, y, lw, lw * logo.height / logo.width},
+                        (Vector2){0, 0}, 0.0f, WHITE);
+                    y += (int)(lw * logo.height / logo.width) + 12;
+                }
+                for (int i = 0; i < n; i++) {
+                    int sz = rows[i].head ? fs * 3 / 2 : fs;
+                    if (rows[i].t[0]) ui_text(rows[i].t, x, y, sz, rows[i].c);
+                    y += sz + sz / 2;
+                }
             }
-            ui_text("KEYS", rx, y, 18, HDR); y += 24;
-            ui_text("X / Y   fullscreen", rx, y, 15, LBL); y += 18;
-            ui_text("P       pause", rx, y, 15, LBL); y += 18;
-            ui_text("F2      screenshot", rx, y, 15, LBL); y += 18;
-            ui_text("Esc     quit", rx, y, 15, LBL);
-            (void)rw;
         }
         if (paused) ui_text("PAUSED", (int)dst.x + 12, (int)dst.y + 12,
                              20, RAYWHITE);
