@@ -19,6 +19,15 @@
 #include "whdload.h"
 #include "pad.h"
 
+/* The game programs a 320x200 display inside the host's 352x288 buffer,
+ * at (17,18) -- the same offset the compositor gates match at.  The rest
+ * is dead border, and scaling it wastes most of the window's height.
+ * Every screen's content sits inside this rectangle, menus included. */
+#define VIEW_X 17
+#define VIEW_Y 18
+#define VIEW_W 320
+#define VIEW_H 200
+
 #define AUDIO_RATE 44100
 #define FRAME_SAMPLES (AUDIO_RATE / 50)
 
@@ -26,7 +35,7 @@ int main(int argc, char **argv)
 {
     WhdConfig whd = { .dir = "original/Lotus2CD32",
                       .slave = "Lotus2CD32.slave" };
-    int scale = 3, fullscreen = 0;
+    int scale = 3, fullscreen = 0, border = 0;
     long shot_at = -1; const char *shot_path = NULL;
     const char *wav_path = NULL, *rec_path = NULL;
     for (int i = 1; i < argc; i++) {
@@ -34,6 +43,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--slave") && i + 1 < argc) whd.slave = argv[++i];
         else if (!strcmp(argv[i], "--scale") && i + 1 < argc) scale = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--fullscreen")) fullscreen = 1;
+        else if (!strcmp(argv[i], "--border")) border = 1;   /* old framing */
         else if (!strcmp(argv[i], "--wav") && i + 1 < argc) wav_path = argv[++i];
         else if (!strcmp(argv[i], "--record") && i + 1 < argc) rec_path = argv[++i];
         else if (!strcmp(argv[i], "--shot") && i + 2 < argc) {
@@ -60,7 +70,7 @@ int main(int argc, char **argv)
     }
 
     SetTraceLogLevel(LOG_WARNING);
-    InitWindow(SCREEN_W * scale, SCREEN_H * scale,
+    InitWindow(VIEW_W * scale, VIEW_H * scale,
                "Lotus Turbo Challenge 2 -- native");
     if (fullscreen) ToggleFullscreen();
     SetTargetFPS(50);
@@ -153,11 +163,13 @@ int main(int argc, char **argv)
         BeginDrawing();
         ClearBackground(BLACK);
         int w = GetScreenWidth(), h = GetScreenHeight();
-        float s = (float)w / SCREEN_W;
-        if ((float)h / SCREEN_H < s) s = (float)h / SCREEN_H;
-        Rectangle src = { 0, 0, SCREEN_W, SCREEN_H };
-        Rectangle dst = { (w - SCREEN_W * s) / 2, (h - SCREEN_H * s) / 2,
-                          SCREEN_W * s, SCREEN_H * s };
+        float sw = border ? SCREEN_W : VIEW_W;
+        float sh = border ? SCREEN_H : VIEW_H;
+        /* fill the height; the width follows and is centred */
+        float s = (float)h / sh;
+        if (sw * s > w) s = (float)w / sw;
+        Rectangle src = { border ? 0 : VIEW_X, border ? 0 : VIEW_Y, sw, sh };
+        Rectangle dst = { (w - sw * s) / 2, (h - sh * s) / 2, sw * s, sh * s };
         DrawTexturePro(screen, src, dst, (Vector2){0, 0}, 0.0f, WHITE);
         if (paused) DrawText("PAUSED", 12, 12, 20, RAYWHITE);
         EndDrawing();
