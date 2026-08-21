@@ -13,7 +13,18 @@
 #
 # Anything else is passed straight through to the binary.
 set -e
-cd "$(dirname "$0")"
+# Resolve the script's own path first: dirname "$0" alone gives the
+# directory of the SYMLINK, not of the repo, so a link in ~/bin would
+# build and run in the wrong place.
+self=$0
+while [ -L "$self" ]; do
+    link=$(readlink "$self")
+    case "$link" in
+        /*) self=$link ;;
+        *)  self=$(dirname "$self")/$link ;;
+    esac
+done
+cd "$(dirname "$self")"
 
 INSTALL=${LOTUS2_INSTALL:-original/Lotus2CD32}
 PAGE=
