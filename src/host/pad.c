@@ -111,7 +111,9 @@ uint8_t keyboard_stick(bool arrows)
     if (arrows) {
         if (IsKeyDown(KEY_SPACE) || IsKeyDown(KEY_LEFT_CONTROL) ||
             IsKeyDown(KEY_ENTER)) state |= 0x10;
-        if (IsKeyDown(KEY_X) || IsKeyDown(KEY_LEFT_SHIFT)) state |= 0x20;
+        /* not X: that opens the course preview in the front end, and a
+         * key cannot both leave the game and press a button in it */
+        if (IsKeyDown(KEY_LEFT_SHIFT)) state |= 0x20;
     } else {
         if (IsKeyDown(KEY_LEFT_ALT) || IsKeyDown(KEY_C)) state |= 0x10;
         if (IsKeyDown(KEY_V) || IsKeyDown(KEY_TAB)) state |= 0x20;

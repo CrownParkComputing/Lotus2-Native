@@ -606,7 +606,14 @@ static void roadplay_draw(float where)
      * pass into it, and walks it through the engine's blitter.  The game
      * spreads the same blits across a frame on blitter interrupts; there
      * is nothing to spread here. */
-    if (f16(&rp_g, A3 + 0x2e02)) {
+    /* STORM only, for now.  SNOW's family ($2147xx) is ported and its
+     * emitter is gated against a SNOW race, but driving the state
+     * machine for it here blanks the picture -- the preview forces $2ebc
+     * back to $60 every frame, and SNOW's bands are much larger ($214810
+     * runs with D6 = $98 against STORM's $6e), so something it writes
+     * lands where the rain's never did.  Wiring it in before that is
+     * understood would trade a correct picture for a black one. */
+    if (rp_course == 7) {
         uint32_t shown = f32(&rp_g, A3 + 0x2f8a);
         pf32(&rp_g, A3 + 0x2f8a, f32(&rp_g, A3 + 0x2f8e));
         pf16(&rp_g, A3 + 0x2ebc, 0x60);       /* first stop of the machine */
@@ -1883,13 +1890,30 @@ int main(int argc, char **argv)
              * those were reaching the guest as well -- so scrubbing the
              * course on the COURSE page was also working the menu behind
              * it, and starting a race. */
-            uint8_t stick = mode == MODE_GAME
-                          ? (keyboard_stick(true) | gamepad_stick(0)) : 0;
+            /* TWO PLAYERS, both here at the machine.  The game reads
+             * port 1 for the near car and port 0 for the far one -- and
+             * port 0 is also what the menus read.  So port 0 carries
+             * player 2 once there IS a player 2, and player 1 until
+             * then, or nobody could work the menus on their own.
+             *
+             * "Is there a player 2" is answered by them doing something:
+             * a second pad appearing, or the player 2 keys being
+             * pressed.  It latches, because a player who lets go of the
+             * controls has not left. */
+            uint8_t p1 = 0, p2 = 0;
+            static int p2_present;
+            if (mode == MODE_GAME) {
+                p1 = keyboard_stick(true) | gamepad_stick(0);
+                p2 = keyboard_stick(false) | gamepad_stick(1);
+                if (p2 || js_present(1)) p2_present = 1;
+            }
+            uint8_t stick = p1;
             if (fire_from >= 0 && swiv_frame_no >= fire_from)
                 stick |= fire_period
                     ? (((swiv_frame_no / fire_period) % 2) ? 0x10 : 0x00)
                     : 0x10;
-            joy_state[0] = joy_state[1] = stick;
+            joy_state[1] = stick;                     /* near car */
+            joy_state[0] = p2_present ? p2 : stick;   /* far car, or menus */
             amiga_run_frame();
             {   /* keep ~80 ms of slack in the ring for the callback */
                 const int target = FRAME_SAMPLES * 4;

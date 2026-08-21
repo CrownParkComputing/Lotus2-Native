@@ -124,7 +124,9 @@ int bezel_panels(Bezel *b, int fps, int natives, int want_debug_btn,
         ROW(side ? "PLAYER 2" : "PLAYER 1", 1, hue);
         ROW("KEYBOARD", 0, HEADHUE);
         if (side) {
-            ROW("not wired up yet", 0, BODYHUE);
+            ROW("W A S D  STEER", 0, BODYHUE);
+            ROW("C        ACCELERATE", 0, BODYHUE);
+            ROW("V        CHANGE GEAR", 0, BODYHUE);
         } else {
             ROW("ARROWS   STEER", 0, BODYHUE);
             ROW("SPACE    ACCELERATE", 0, BODYHUE);
@@ -135,6 +137,7 @@ int bezel_panels(Bezel *b, int fps, int natives, int want_debug_btn,
         ROW("D-PAD    STEER", 0, BODYHUE);
         ROW("A / RB   ACCELERATE", 0, BODYHUE);
         ROW("B / LB   CHANGE GEAR", 0, BODYHUE);
+        ROW(side ? "second pad, port 0" : "first pad, port 1", 0, BODYHUE);
         ROW(side ? "JOYSTICK PORT 0" : "JOYSTICK PORT 1", 0, hue);
         ROW("", 0, BODYHUE);
         if (side) {

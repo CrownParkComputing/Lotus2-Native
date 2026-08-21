@@ -649,6 +649,12 @@ int main(int argc, char **argv)
                                "re/pipeline/storm/ws_0_2148c0_fast.bin",
                                "re/pipeline/storm/ws_1_2148c4_fast.bin",
                                stage_weather_span);
+            /* the same emitter, driven by SNOW's family instead */
+            stage_range(0x200000, 0x201000);
+            rc |= verify_stage("snow weather_emit",
+                               "re/pipeline/storm/sn_0_2147ce_fast.bin",
+                               "re/pipeline/storm/sn_1_2147d2_fast.bin",
+                               stage_weather_emit);
             stage_range(0x200000, 0x201000);
             rc |= verify_stage("storm weather_emit",
                                "re/pipeline/storm/we_0_2148ca_fast.bin",

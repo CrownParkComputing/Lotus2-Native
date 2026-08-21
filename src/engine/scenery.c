@@ -855,36 +855,59 @@ void weather_band(Game *g, Regs *r, int which)
 {
     struct Band {
         uint16_t d0, d3, d7, d6;
+        int clr_d7;                       /* clr.w D7 rather than moveq */
         int n;
-        struct { uint16_t d4; int moveq_d4; uint32_t d2; } step[6];
+        struct { uint16_t d4; int moveq_d4; uint32_t d5, d2; } step[6];
     };
-    static const struct Band BANDS[3] = {
+    /* 0-2 are the $2148xx family (STORM's rain), 3-6 the $2147xx family
+     * (SNOW's falling snow).  Which course runs which was measured, not
+     * guessed: `make pcset` on all eight says STORM reaches $2148b2 and
+     * SNOW reaches $214798, and nothing else reaches either.
+     *
+     * The two families differ in more than constants: the snow bands
+     * step D5 -- the index into the shape table at $2438(A3) -- for
+     * every emit, while the rain bands leave it at zero throughout. */
+    static const struct Band BANDS[7] = {
         /* $2148b2 */
-        { 0x200, 0x00d0, 0x40, 0x001a, 2,
-          { {0x00, 0, 0x0c}, {0x2a, 1, 0x0b} } },
+        { 0x200, 0x00d0, 0x40, 0x001a, 0, 2,
+          { {0x00, 0, 0, 0x0c}, {0x2a, 1, 0, 0x0b} } },
         /* $2148da */
-        { 0x400, 0x00cc, 0x20, 0x0044, 4,
-          { {0x00, 0, 0x0c}, {0x2a, 1, 0x0c},
-            {0x54, 1, 0x0c}, {0x7e, 1, 0x0b} } },
+        { 0x400, 0x00cc, 0x20, 0x0044, 0, 4,
+          { {0x00, 0, 0, 0x0c}, {0x2a, 1, 0, 0x0c},
+            {0x54, 1, 0, 0x0c}, {0x7e, 1, 0, 0x0b} } },
         /* $214914 */
-        { 0x600, 0x00dc, 0x00, 0x006e, 6,
-          { {0x00, 0, 0x0c}, {0x2a, 1, 0x0c}, {0x54, 1, 0x0c},
-            {0x7e, 1, 0x0c}, {0xa8, 0, 0x0b}, {0xd2, 0, 0x0b} } },
+        { 0x600, 0x00dc, 0x00, 0x006e, 1, 6,
+          { {0x00, 0, 0, 0x0c}, {0x2a, 1, 0, 0x0c}, {0x54, 1, 0, 0x0c},
+            {0x7e, 1, 0, 0x0c}, {0xa8, 0, 0, 0x0b}, {0xd2, 0, 0, 0x0b} } },
+        /* $214798 */
+        { 0x100, 0x00d0, 0x60, 0x001a, 0, 1,
+          { {0x00, 0, 0x00, 0x0a} } },
+        /* $2147b6 */
+        { 0x200, 0x00cc, 0x40, 0x0044, 0, 2,
+          { {0x00, 0, 0x04, 0x0a}, {0x2a, 1, 0x08, 0x0a} } },
+        /* $2147de */
+        { 0x400, 0x00dc, 0x20, 0x006e, 0, 3,
+          { {0x00, 0, 0x0c, 0x0a}, {0x2a, 1, 0x10, 0x0a},
+            {0x54, 1, 0x14, 0x0a} } },
+        /* $214810 */
+        { 0x800, 0x0130, 0x00, 0x0098, 1, 4,
+          { {0x00, 0, 0x18, 0x0a}, {0x2a, 1, 0x1c, 0x0a},
+            {0x54, 1, 0x20, 0x0a}, {0x7e, 1, 0x24, 0x0a} } },
     };
-    if (which < 0 || which > 2) return;
+    if (which < 0 || which > 6) return;
     const struct Band *b = &BANDS[which];
 
     r->d[0] = setw(r->d[0], b->d0);          /* move.w */
     r->d[3] = setw(r->d[3], b->d3);
-    if (which == 2) r->d[7] = setw(r->d[7], 0);   /* clr.w D7 */
-    else            r->d[7] = b->d7;              /* moveq */
+    if (b->clr_d7) r->d[7] = setw(r->d[7], 0);    /* clr.w D7 */
+    else           r->d[7] = b->d7;               /* moveq */
     r->d[6] = setw(r->d[6], b->d6);
     weather_span(g, r);
 
     for (int i = 0; i < b->n; i++) {
         if (b->step[i].moveq_d4) r->d[4] = b->step[i].d4;   /* moveq */
         else r->d[4] = setw(r->d[4], b->step[i].d4);        /* clr.w/move.w */
-        r->d[5] = 0;                                        /* moveq #0,D5 */
+        r->d[5] = b->step[i].d5;                            /* moveq #n,D5 */
         r->d[2] = b->step[i].d2;                            /* moveq */
         weather_emit(g, r);
     }
@@ -898,10 +921,10 @@ void weather_band(Game *g, Regs *r, int which)
  * set.  A0-A2 are saved around every call, so the caller's pointers
  * survive.
  *
- * Only the $2148xx family is ported: it is the one a STORM race runs,
- * and `make pcset` says the $2147xx family does not execute on either
- * course captured so far.  When a course is found that uses it, the
- * table above is where it goes.
+ * BOTH families are ported.  `make pcset` over all eight courses says
+ * STORM is the only one that reaches the $2148xx set and SNOW the only
+ * one that reaches the $2147xx set; the other six draw no weather at
+ * all through this pass.
  */
 void weather_step(Game *g, Regs *r)
 {
@@ -914,8 +937,10 @@ void weather_step(Game *g, Regs *r)
     uint32_t a0 = r->a[0], a1 = r->a[1], a2 = r->a[2];
     if (family_b) {
         /* $2148b0 for phase $60 is a bare rts: the first stop draws
-         * nothing on this family. */
+         * nothing on the rain family. */
         if (band >= 1) weather_band(g, r, band - 1);
+    } else {
+        weather_band(g, r, 3 + band);       /* the snow family, all four */
     }
     r->a[0] = a0; r->a[1] = a1; r->a[2] = a2;   /* movem.l (A7)+,A0-A2 */
 
