@@ -1080,9 +1080,12 @@ static void hud_speedo(uint32_t *img)
     if (mph > 200.0f) mph = 200.0f;
     speedo_mph = mph;
 
-    /* the HUD band's own background, taken from beside the readout --
-     * black would be a hole, because the sky is behind this band */
-    uint32_t bg = hud_get(img, SPEEDO_X + SPEEDO_W + 14, SPEEDO_Y + 6);
+    /* The band has the SKY behind it, and the sky is a gradient, so one
+     * sampled colour painted across the whole block reads as a slab laid
+     * over the picture.  Each row takes its own colour, from beyond
+     * everything being covered. */
+    #define HUD_CLEAR_TO 110
+    uint32_t bg = hud_get(img, HUD_CLEAR_TO + 6, SPEEDO_Y + 6);
 
     /* lift the position glyphs before anything is painted over */
     static uint32_t glyph[POS_W * POS_H];
@@ -1090,9 +1093,11 @@ static void hud_speedo(uint32_t *img)
         for (int x = 0; x < POS_W; x++)
             glyph[y * POS_W + x] = hud_get(img, POS_SX + x, POS_SY + y);
 
-    for (int y = 0; y < SPEEDO_Y + SPEEDO_H; y++)
-        for (int x = 0; x < SPEEDO_X + SPEEDO_W + 12; x++)
-            hud_pixel(img, x, y, bg);
+    for (int y = 0; y < SPEEDO_Y + SPEEDO_H; y++) {
+        uint32_t rowbg = hud_get(img, HUD_CLEAR_TO + 6, y);
+        for (int x = 0; x < HUD_CLEAR_TO; x++)
+            hud_pixel(img, x, y, rowbg);
+    }
 
     /* put the position above the countdown, keeping only its ink */
     for (int y = 0; y < POS_H; y++)
@@ -1137,17 +1142,17 @@ static void hud_speedo(uint32_t *img)
 
 
 /* A gear lever beside the dial.  The gear is a word in the car block at
- * $3054(A3)+$28 -- the same one the drive harness prints -- and Lotus 2
- * is a four-speed with a low and a high range, so the gate is drawn as
- * two columns and the knob sits where the lever would be.
+ * $3054(A3)+$28 -- the same one the drive harness prints -- and the
+ * Esprit has FIVE, so the gate is the usual three columns: 1 and 2 on
+ * the left, 3 and 4 in the middle, 5 up on the right.
  *
  * A lever rather than a digit because you read it without looking, which
  * is the whole point of a gear indicator at 140 mph.
  */
 #define GEAR_X 74
-#define GEAR_Y 10
-#define GEAR_W 22
-#define GEAR_H 32
+#define GEAR_Y 8
+#define GEAR_W 30
+#define GEAR_H 34
 
 static void hud_gear(uint32_t *img)
 {
@@ -1158,28 +1163,28 @@ static void hud_gear(uint32_t *img)
 
     const uint32_t white = 0xffccccccu, grey = 0xff666666u,
                    red = 0xff0000aau;
-    uint32_t bg = hud_get(img, GEAR_X + GEAR_W + 10, GEAR_Y + 4);
-    for (int y = GEAR_Y - 4; y < GEAR_Y + GEAR_H + 2; y++)
-        for (int x = GEAR_X - 2; x < GEAR_X + GEAR_W + 2; x++)
-            hud_pixel(img, x, y, bg);
-
-    /* the gate: two columns joined across the middle */
-    int lx = GEAR_X + 4, rx = GEAR_X + GEAR_W - 4;
+    uint32_t bg_row_dummy = hud_get(img, GEAR_X + GEAR_W + 8, GEAR_Y + 4);
+    /* the speedo pass already cleared this band, row by row */
+    /* the gate: three columns joined across the middle */
+    int lx = GEAR_X + 3, mx = GEAR_X + GEAR_W / 2, rx = GEAR_X + GEAR_W - 3;
     int ty = GEAR_Y, by = GEAR_Y + GEAR_H - 2, my = (ty + by) / 2;
-    for (int y = ty; y <= by; y++) { hud_pixel(img, lx, y, grey);
-                                     hud_pixel(img, rx, y, grey); }
+    for (int y = ty; y <= by; y++) {
+        hud_pixel(img, lx, y, grey);
+        hud_pixel(img, mx, y, grey);
+        hud_pixel(img, rx, y, grey);
+    }
     for (int x = lx; x <= rx; x++) hud_pixel(img, x, my, grey);
+    /* fifth has no reverse below it on this gate */
+    for (int y = my; y <= by; y++) hud_pixel(img, rx, y, bg_row_dummy);
 
-    /* where the lever sits: 1 and 2 on the left column, 3 and 4 on the
-     * right, neutral in the middle of the gate */
     int kx, ky;
     switch (gear) {
     case 1:  kx = lx; ky = ty + 3;      break;
     case 2:  kx = lx; ky = by - 3;      break;
-    case 3:  kx = rx; ky = ty + 3;      break;
-    case 4:  kx = rx; ky = by - 3;      break;
-    case 5:  kx = rx; ky = my - 6;      break;
-    default: kx = (lx + rx) / 2; ky = my; break;
+    case 3:  kx = mx; ky = ty + 3;      break;
+    case 4:  kx = mx; ky = by - 3;      break;
+    case 5:  kx = rx; ky = ty + 3;      break;
+    default: kx = mx; ky = my;          break;
     }
     for (int dx = -2; dx <= 2; dx++)
         for (int dy = -2; dy <= 2; dy++)
@@ -2425,15 +2430,20 @@ static void pw_begin(int course)
     pw_add(60,  0x01, -1);
     pw_add(120, 0x01, -1);
     pw_add(200, 0x10, -1);             /* fire: open the field */
-    long f = 300;
+    /* As fast as the handshake will take them.  The 40-frame gap in
+     * course_session.py is there because a RECORDING has to name a frame
+     * for each letter in advance; typing live can just wait for
+     * amiga_kbd_idle() and go, which turns eight seconds of watching a
+     * password appear into about one. */
+    long f = 260;
     for (const char *c = pass; *c; c++) {
         int raw = pw_raw(*c);
         if (raw >= 0) pw_add(f, 0, raw);
-        f += 40;
+        f += 6;
     }
-    long ret = f + 40;
+    long ret = f + 10;
     pw_add(ret, 0, 0x44);              /* RETURN */
-    long d = ret + 140;
+    long d = ret + 90;
     pw_add(d,       0x02, -1);         /* down x3: back to GAME */
     pw_add(d + 60,  0x02, -1);
     pw_add(d + 120, 0x02, -1);
@@ -2451,14 +2461,19 @@ static uint8_t pw_frame(void)
     for (int i = 0; i < pw_count; i++)
         if (pw_clock >= pw_step[i].at && pw_clock < pw_step[i].at + 6)
             stick |= pw_step[i].stick;
+    int stalled = 0;
     while (pw_at < pw_count && pw_step[pw_at].at <= pw_clock) {
         if (pw_step[pw_at].key >= 0) {
-            if (!amiga_kbd_idle()) break;      /* wait for the handshake */
+            if (!amiga_kbd_idle()) { stalled = 1; break; }
             amiga_key_event((uint8_t)pw_step[pw_at].key, false);
         }
         pw_at++;
     }
-    pw_clock++;
+    /* Hold the whole schedule while a letter is waiting on the keyboard
+     * handshake.  Letting the clock run on would fire the RETURN, the
+     * menu moves and the start press against a password that is still
+     * being typed. */
+    if (!stalled) pw_clock++;
     if (pw_at >= pw_count && pw_clock > pw_step[pw_count - 1].at + 30) {
         pw_running = 0;
         SetTargetFPS(50);
