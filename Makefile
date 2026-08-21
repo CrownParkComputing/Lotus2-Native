@@ -69,7 +69,8 @@ build/lotus2_recomp.o: $(RECOMP_SRC) src/recomp/m68krt.h
 	$(CC) -O1 -std=c11 -w -Isrc/recomp -c -o $@ $(RECOMP_SRC)
 
 build/lotus2_recomp: src/host/lotus2_run.c $(HOST) $(HOST_H) \
-		src/host/cpu_recomp.c src/recomp/m68krt.h build/lotus2_recomp.o
+		src/host/cpu_recomp.c src/recomp/m68krt.h $(NATIVE_OVR) \
+		$(ENGINE_H) build/lotus2_recomp.o
 	mkdir -p build
 	$(CC) $(CFLAGS_RECOMP) -Isrc/engine -o $@ src/host/lotus2_run.c \
 		$(HOST) src/host/cpu_recomp.c $(NATIVE_OVR) \
@@ -95,7 +96,7 @@ build/lotus2_native: src/engine/lotus2_native.c $(ENGINE) $(ENGINE_H)
 # play.  This is the game screen, the pad and the sound, nothing else.
 build/lotus2_game: src/host/lotus2_game.c $(HOST) $(HOST_H) \
 		src/host/pad.c src/host/cpu_recomp.c src/recomp/m68krt.h \
-		build/lotus2_recomp.o
+		$(NATIVE_OVR) $(ENGINE_H) build/lotus2_recomp.o
 	mkdir -p build
 	$(CC) $(CFLAGS_RECOMP) -Isrc/engine -o $@ src/host/lotus2_game.c \
 		$(HOST) src/host/pad.c src/host/cpu_recomp.c $(NATIVE_OVR) \
@@ -114,7 +115,7 @@ debug: build/lotus2_play
 # The debug viewer driven by recompiled C (map/track/geometry pages).
 build/lotus2_play: src/viewer/lotus2_view.c $(HOST) $(HOST_H) \
 		src/host/pad.c src/host/cpu_recomp.c src/recomp/m68krt.h \
-		build/lotus2_recomp.o
+		$(NATIVE_OVR) $(ENGINE_H) build/lotus2_recomp.o
 	mkdir -p build
 	$(CC) $(CFLAGS_RECOMP) -Isrc/engine -o $@ \
 		src/viewer/lotus2_view.c $(HOST) src/host/pad.c \
@@ -404,4 +405,26 @@ test: selftest boot-test
 clean:
 	rm -rf build
 
-.PHONY: course-gate replay-gate override-check frame-gate debug coherence play no-musashi decode-check recomp recomp-gate statelog trace pcset drive all native boot-test selftest oracle test clean gate-capture road-capture render-gate view view-race track course
+.PHONY: course-snaps course-gate replay-gate override-check frame-gate debug coherence play no-musashi decode-check recomp recomp-gate statelog trace pcset drive all native boot-test selftest oracle test clean gate-capture road-capture render-gate view view-race track course
+
+# Per-course race snapshots for the viewer's ROAD VIEW.  Each is a real
+# race in that course, reached by replaying the password session that
+# make course-gate uses, so the road chain has that course's own table,
+# palette and copper list to work from.  Big (9 MB each) and derived, so
+# they are not in the repository -- regenerate with this target.
+COURSE_SNAPS = night fog snow desert motorway marsh storm
+course-snaps: build/lotus2_recomp
+	mkdir -p re/pipeline/courses
+	SWIV_SNAP_PCS=211e78 SWIV_SNAP_FROM=6300 SWIV_SNAP_MAX=1 \
+	SWIV_SNAP_PREFIX=re/pipeline/courses/forest_ \
+	./build/lotus2_recomp --dir $(INSTALL) --fire-from 2100 \
+		--fire-period 100 --frames 6310 >/dev/null 2>&1
+	@for c in $(COURSE_SNAPS); do \
+		SWIV_SNAP_PCS=211e78 SWIV_SNAP_FROM=6300 SWIV_SNAP_MAX=1 \
+		SWIV_SNAP_PREFIX=re/pipeline/courses/$$c\_ \
+		./build/lotus2_recomp --dir $(INSTALL) \
+			--replay re/pipeline/courses/$$c.rec \
+			--keys re/pipeline/courses/$$c.keys \
+			--frames 6310 >/dev/null 2>&1; \
+		echo "course-snaps: $$c"; \
+	done

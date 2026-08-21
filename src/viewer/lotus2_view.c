@@ -7,7 +7,8 @@
  *
  * Pages:
  *   PLAY     the game, driven by keyboard/pad
- *   COURSE   top-down map of the 1024-segment course + live car position
+ *   COURSE   the course driven by the game's own road chain, beside a
+ *            top-down map, a gradient profile and a whole-course strip
  *   TRACK    the per-frame road geometry the interpolator emits
  *   GEOM     the blit queue road_blitqueue() builds
  *   DISPLAY  chipset display state + the master palette
@@ -17,12 +18,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <math.h>
 #include "raylib.h"
 #include "amiga.h"
 #include "whdload.h"
 #include "pad.h"
 #include "cpu.h"
+#include "engine.h"
+#include "compositor.h"
 
 #define A3 0x208000u
 
@@ -154,8 +158,16 @@ static void page_head(const char *title)
 }
 
 /* ---- course geometry ------------------------------------------------ */
+/* The race snapshot the track player holds, when it holds the course the
+ * page is showing.  Declared here so the 2D views read the SAME table the
+ * road chain is drawing from -- otherwise the map and the road view could
+ * be two different courses. */
+static const uint8_t *course_snapshot_table(void);
+
 static uint8_t course_byte(int seg, int off)
 {
+    const uint8_t *snap = course_snapshot_table();
+    if (snap) return snap[seg * COURSE_RECORD + off];
     if (course_file)
         return course_file[COURSE_FILE_TABLE + seg * COURSE_RECORD + off];
     return (uint8_t)m68k_read_memory_8(COURSE_BASE +
@@ -325,12 +337,12 @@ static float course_rendered_at = -1;
 #define RACE_ROW_STRIDE   42
 #define RACE_PLANES       4
 
-static void road_grab(void)
+/* Decode the race bitmap out of ANY chip image, so the same proven
+ * decoder serves both the live grab and the offline track player. */
+static void decode_race_planes(const uint8_t *cm, uint32_t cmsize,
+                               uint32_t buf, const uint16_t *pal)
 {
-    uint32_t buf = (r32(A3 + 0x2f8a) + 2) & ~1u;
-    if (buf < 0x400 || buf >= CHIP_SIZE) return;
-    uint16_t pal[32];
-    amiga_get_palette(pal);
+    if (buf < 0x400 || buf >= cmsize) return;
     for (int y = 0; y < VIEW_H; y++)
         for (int x = 0; x < VIEW_W; x++) {
             unsigned idx = 0;
@@ -338,8 +350,8 @@ static void road_grab(void)
                 uint32_t at = buf + (uint32_t)p * RACE_PLANE_STRIDE
                             + (uint32_t)y * RACE_ROW_STRIDE
                             + (uint32_t)(x >> 3);
-                if (at >= CHIP_SIZE) continue;
-                if ((chip[at] >> (7 - (x & 7))) & 1) idx |= 1u << p;
+                if (at >= cmsize) continue;
+                if ((cm[at] >> (7 - (x & 7))) & 1) idx |= 1u << p;
             }
             uint16_t c = pal[idx & 31];
             /* host packs blue high, red low (see amiga.c rgb4) */
@@ -351,9 +363,135 @@ static void road_grab(void)
     road_valid = 1;
 }
 
+static void road_grab(void)
+{
+    uint16_t pal[32];
+    amiga_get_palette(pal);
+    decode_race_planes(chip, CHIP_SIZE, (r32(A3 + 0x2f8a) + 2) & ~1u, pal);
+}
+
 static void road_pc_hook(unsigned int pc)
 {
     if (pc == road_capture_pc) road_grab();
+}
+
+/* ---- native track player --------------------------------------------
+ * The ROAD VIEW runs the GAME'S OWN road pipeline: the ported chain in
+ * src/engine/road.c -- the same C the native build races on -- over a
+ * real race snapshot of the selected course, captured by `make
+ * course-snaps` from a replay that enters that course's password.
+ *
+ * Seeking uses the game's own mechanism: the course position long at
+ * $30d8(A3), whose high word is the record index both $213edc and
+ * $21508a walk the course table by.  So dragging the scrub bar drives
+ * the real interpolator rather than a model of it, and what appears is
+ * the track as the game draws it, without cars or HUD on top -- the
+ * object passes that would put them there are simply not called.
+ *
+ * The 2D pages (map, profile, strip) still read the course table, so
+ * they and this view are two readings of the same bytes.
+ */
+static Game rp_g;
+static Blitter rp_bl;
+static int rp_ready;            /* a snapshot is loaded */
+static int rp_course = -1;      /* which COURSES[] entry it holds */
+static char rp_note[96];
+
+#define RP_VIEW (A3 + 0x3054)
+
+static const char *const ROADPLAY_NAMES[COURSE_COUNT] = {
+    "forest", "night", "fog", "snow", "desert", "motorway", "marsh", "storm"
+};
+
+static void roadplay_load(int course)
+{
+    const char *const *NAMES = ROADPLAY_NAMES;
+    if (course < 0 || course >= COURSE_COUNT) return;
+    char fp[256], cp[256];
+    snprintf(fp, sizeof fp, "re/pipeline/courses/%s_0_211e78_fast.bin",
+             NAMES[course]);
+    snprintf(cp, sizeof cp, "re/pipeline/courses/%s_0_211e78_chip.bin",
+             NAMES[course]);
+    size_t len = 0;
+    uint8_t *nf = guest_load(fp, GUEST_FAST_SIZE, &len);
+    uint8_t *nc = guest_load(cp, GUEST_CHIP_SIZE, &len);
+    if (!nf || !nc) {
+        free(nf); free(nc);
+        rp_ready = 0;
+        snprintf(rp_note, sizeof rp_note,
+                 "no snapshot for %s -- run make course-snaps", NAMES[course]);
+        return;
+    }
+    free(rp_g.fast); free(rp_g.chip);
+    rp_g.fast = nf;
+    rp_g.chip = nc;
+    rp_g.base = rp_g.fast + (GUEST_BASE_ADDR - GUEST_FAST_ADDR);
+    rp_bl = (Blitter){0};
+    rp_bl.chip = rp_g.chip;
+    rp_bl.chip_size = GUEST_CHIP_SIZE;
+    rp_bl.bltafwm = rp_bl.bltalwm = 0xffff;
+    rp_ready = 1;
+    rp_course = course;
+    snprintf(rp_note, sizeof rp_note,
+             "the game's own road chain in native C  "
+             "(car and scenery are frozen snapshot pixels)");
+}
+
+static const uint8_t *course_snapshot_table(void)
+{
+    if (!rp_ready || rp_course != course_sel) return NULL;
+    return rp_g.fast + (COURSE_BASE - GUEST_FAST_ADDR);
+}
+
+/* One frame of the road chain at an arbitrary course position. */
+static void roadplay_draw(int seg)
+{
+    if (!rp_ready) return;
+    if (seg < 0) seg = 0;
+    if (seg > COURSE_SEGMENTS - 1) seg = COURSE_SEGMENTS - 1;
+    pf32(&rp_g, A3 + 0x30d8, (uint32_t)seg << 16);
+
+    road_sky(&rp_g);
+    road_keyframes_near(&rp_g);
+    road_interpolate(&rp_g, 0);
+    road_band_bounds(&rp_g, RP_VIEW);
+    road_perspective_near(&rp_g, f16(&rp_g, RP_VIEW + 0x98));
+    road_blitqueue(&rp_g);
+    road_bands(&rp_g, &rp_bl, f32(&rp_g, A3 + 0x2f8e), A3 - 0x2bd8,
+               A3 - 0x4180, f16(&rp_g, A3 + 0x30e4), f16(&rp_g, A3 + 0x30ec),
+               f16(&rp_g, A3 + 0x30dc), f32(&rp_g, A3 + 0x30d8), 0x2c);
+
+    /* Show it the way the machine would.  The racing screen's colours
+     * are not one palette: the sky is a copper gradient, so decoding the
+     * bitplanes against a flat 32-entry table gives a black sky and a
+     * blue road.  The native compositor is a per-line copper interpreter
+     * -- the same one the render gate proves pixel-identical to the
+     * oracle -- so run the copper list instead.
+     *
+     * Which list?  The game keeps one per screen buffer, so pick the one
+     * whose BPL1PT points at the buffer we just drew into rather than
+     * assuming an address. */
+    uint32_t drawn = f32(&rp_g, A3 + 0x2f8e);
+    static const uint32_t COPLISTS[] = {0x7f5f0, 0x7ed0c, 0x7fedc};
+    uint32_t use = 0;
+    for (int k = 0; k < 3 && !use; k++) {
+        uint32_t hi = 0, lo = 0, at = COPLISTS[k];
+        for (int i = 0; i < 2048; i++, at += 4) {
+            uint16_t reg = g16(rp_g.chip, at), dat = g16(rp_g.chip, at + 2);
+            if (reg == 0x00e0) hi = dat;
+            else if (reg == 0x00e2) lo = dat;
+            else if (reg == 0xffff && dat == 0xfffe) break;
+        }
+        if (((hi << 16) | lo) == ((drawn + 2) & ~1u)) use = COPLISTS[k];
+    }
+    if (use && composite(rp_g.chip, use, road_img) == 0) {
+        road_valid = 1;
+        return;
+    }
+    /* No matching list: fall back to the flat-palette decode. */
+    uint16_t pal[32];
+    for (int i = 0; i < 32; i++) pal[i] = f16(&rp_g, A3 + G_PALETTE + 2 * i);
+    decode_race_planes(rp_g.chip, GUEST_CHIP_SIZE, (drawn + 2) & ~1u, pal);
 }
 
 /* ---- course preview renderer ----------------------------------------
@@ -650,21 +788,28 @@ static void render_road_frame(int segment)
 
 static void course_draw_3d(Rectangle r)
 {
-    int road_h = GAME_H;
-    float sc = r.width / (float)GAME_W;
-    float sy = r.height / (float)road_h;
-    if (sy < sc) sc = sy;
-    Rectangle dst = {r.x + (r.width - GAME_W * sc) * 0.5f,
-                     r.y + (r.height - road_h * sc) * 0.5f,
-                     GAME_W * sc, road_h * sc};
     DrawRectangleRec(r, (Color){10, 10, 14, 255});
+
+    /* The caption gets its own strip.  Drawn over the picture it sat on
+     * top of the game's own HUD and neither could be read. */
+    const int CAP = 30;
+    char t[160];
+    snprintf(t, sizeof t, "ROAD VIEW  %s",
+             rp_ready ? rp_note : "preview drawn from the decoded track table");
+    ui_text(t, (int)r.x + 8, (int)r.y + 5, 20, LABEL);
+
+    Rectangle inner = {r.x, r.y + CAP, r.width, r.height - CAP};
+    int road_h = GAME_H;
+    float sc = inner.width / (float)GAME_W;
+    float sy = inner.height / (float)road_h;
+    if (sy < sc) sc = sy;
+    Rectangle dst = {inner.x + (inner.width - GAME_W * sc) * 0.5f,
+                     inner.y + (inner.height - road_h * sc) * 0.5f,
+                     GAME_W * sc, road_h * sc};
     UpdateTexture(road_tex, road_img);
     DrawTexturePro(road_tex, (Rectangle){0, 0, GAME_W, GAME_H}, dst,
                    (Vector2){0, 0}, 0.0f, WHITE);
     DrawRectangleLinesEx(r, 1, GRID);
-    char t[96];
-    snprintf(t, sizeof t, "ROAD VIEW  course preview from the track table");
-    ui_text(t, (int)r.x + 8, (int)r.y + 6, 22, LABEL);
 }
 
 /* ---- scrollable top-down map ---------------------------------------- */
@@ -811,7 +956,11 @@ static void page_course(void)
      * game reaches a race, so caching on the scrub position alone left a
      * blank straight road on screen forever if the first render happened
      * before the data arrived. */
-    render_road_frame((int)course_scrub);
+    /* The game's own road chain when a snapshot for this course is
+     * available; the decoded-table preview only when it is not. */
+    if (!rp_ready || rp_course != course_sel) roadplay_load(course_sel);
+    if (rp_ready) roadplay_draw((int)course_scrub);
+    else render_road_frame((int)course_scrub);
     course_rendered_at = course_scrub;
 
     const char *nm = course_name();
@@ -840,6 +989,16 @@ static void page_course(void)
         FILE *probe = fopen(COURSES[i].file, "rb");
         if (probe) { have = 1; fclose(probe); }
         if (!have) {
+            /* a race snapshot is data enough: the road view and the 2D
+             * views both read the course table out of it */
+            char sp[256];
+            snprintf(sp, sizeof sp,
+                     "re/pipeline/courses/%s_0_211e78_fast.bin",
+                     ROADPLAY_NAMES[i]);
+            probe = fopen(sp, "rb");
+            if (probe) { have = 1; fclose(probe); }
+        }
+        if (!have) {
             DrawRectangleRec(b, (Color){34, 34, 40, 255});
             DrawRectangleLinesEx(b, 1, (Color){60, 60, 68, 255});
             int fs = 20, tw = ui_measure(COURSES[i].name, fs);
@@ -848,11 +1007,12 @@ static void page_course(void)
             continue;
         }
         if (button(b, COURSES[i].name, i == course_sel) && i != course_sel) {
-            if (course_load(COURSES[i].file)) {
-                course_sel = i;
-                course_scrub = 0;
-                course_playing = 0;
-            }
+            /* the .l2c is optional now; the snapshot carries the table */
+            course_load(COURSES[i].file);
+            course_sel = i;
+            course_scrub = 0;
+            course_playing = 0;
+            roadplay_load(i);
         }
     }
 
@@ -1131,6 +1291,11 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--course") && i + 1 < argc)
             course_path = argv[++i];
         else if (!strcmp(argv[i], "--live")) course_path = NULL;
+        else if (!strcmp(argv[i], "--level") && i + 1 < argc) {
+            const char *w = argv[++i];
+            for (int k = 0; k < COURSE_COUNT; k++)
+                if (!strcasecmp(w, COURSES[k].name)) course_sel = k;
+        }
         else if (!strcmp(argv[i], "--static")) course_follow = 0;
         else if (!strcmp(argv[i], "--roadpc") && i + 1 < argc)
             road_capture_pc = (uint32_t)strtoul(argv[++i], NULL, 16);

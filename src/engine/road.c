@@ -574,14 +574,19 @@ void road_sky(Game *g)
         d0 = (uint16_t)-d0;
         d0 = (uint16_t)(d0 + 0x4a);
         if ((int16_t)d0 < 0) d0 = 0;
-        uint32_t src = f32(g, A3 + 0x2c8a);
+        /* $2c8a(A3) is a colour-ramp pointer, and where it points is
+         * per-course: seven of the eight courses put it in ExpMem, but
+         * STORM's lands in chip RAM ($019dc6).  A fast-only accessor
+         * underflows on that and takes the process with it, so this read
+         * -- and only this one -- goes through the range-aware form. */
+        uint32_t src = m32(g, A3 + 0x2c8a);
         src += (uint32_t)(int32_t)(int16_t)d0;
         src += (uint32_t)(int32_t)(int16_t)d0;
         d1 = (uint16_t)(d1 + d7);
 
         for (uint16_t i = 0; i < d2; i++) {          /* $21384a x d2 */
             pc8(g, a0, (uint8_t)d1);
-            pc16(g, a0 + 6, f16(g, src));
+            pc16(g, a0 + 6, m16(g, src));
             src += 2;
             a0 += 8;
             d1 = (uint16_t)(d1 + 4);
