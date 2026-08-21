@@ -1008,61 +1008,133 @@ static void render_road_frame(int segment)
  * black, because the HUD band has the sky behind it and a black rectangle
  * would sit there like a hole.
  */
-#define SPEEDO_X 2
-#define SPEEDO_Y 13
-#define SPEEDO_W 48
-#define SPEEDO_H 14
+/* The HUD, measured off a race frame at 320x200:
+ *
+ *   "000 MPH"   x 2..64   y 2..10
+ *   speed bar   x 2..50   y 13..25
+ *   "1ST"       x 6..36   y 26..44
+ *   score       x 254..318 y 2..10
+ *   countdown   x 285..318 y 25..45
+ *
+ * The left third is three small things stacked; taking all of it gives
+ * room for a dial worth reading.  The position moves up beside the
+ * score, above the countdown, by COPYING the game's own glyphs rather
+ * than by finding the value and drawing digits of our own -- the art is
+ * already there and it is the game's.
+ */
+#define SPEEDO_X 1
+#define SPEEDO_Y 4
+#define SPEEDO_W 68
+#define SPEEDO_H 42
+#define POS_SX 4
+#define POS_SY 26
+#define POS_W  36
+#define POS_H  19
+#define POS_DX 280
+#define POS_DY 8
+static float speedo_mph;          /* for the numbers, drawn in the panel */
 
 static void hud_pixel(uint32_t *img, int x, int y, uint32_t c)
 {
     if (x >= 0 && x < GAME_W && y >= 0 && y < GAME_H)
         img[(GAME_OY + y) * SCREEN_W + GAME_OX + x] = c;
 }
+static uint32_t hud_get(const uint32_t *img, int x, int y)
+{
+    if (x < 0 || x >= GAME_W || y < 0 || y >= GAME_H) return 0;
+    return img[(GAME_OY + y) * SCREEN_W + GAME_OX + x];
+}
 
 static void hud_speedo(uint32_t *img)
 {
     if (!road_extras) return;
-    /* the game's own speed word, and its own idea of MPH: the digits
-     * read about a fortieth of it */
     int word = (int16_t)r16(A3 + 0x3054 + 0x0e);
     if (word < 0) word = 0;
     float mph = word / 40.0f;
     if (mph > 200.0f) mph = 200.0f;
+    speedo_mph = mph;
 
-    uint32_t bg = img[(GAME_OY + SPEEDO_Y + 2) * SCREEN_W
-                      + GAME_OX + SPEEDO_X + SPEEDO_W + 6];
-    for (int y = SPEEDO_Y - 1; y < SPEEDO_Y + SPEEDO_H + 1; y++)
-        for (int x = SPEEDO_X - 1; x < SPEEDO_X + SPEEDO_W + 1; x++)
+    /* the HUD band's own background, taken from beside the readout --
+     * black would be a hole, because the sky is behind this band */
+    uint32_t bg = hud_get(img, SPEEDO_X + SPEEDO_W + 14, SPEEDO_Y + 6);
+
+    /* lift the position glyphs before anything is painted over */
+    static uint32_t glyph[POS_W * POS_H];
+    for (int y = 0; y < POS_H; y++)
+        for (int x = 0; x < POS_W; x++)
+            glyph[y * POS_W + x] = hud_get(img, POS_SX + x, POS_SY + y);
+
+    for (int y = 0; y < SPEEDO_Y + SPEEDO_H; y++)
+        for (int x = 0; x < SPEEDO_X + SPEEDO_W + 12; x++)
             hud_pixel(img, x, y, bg);
 
-    const uint32_t white = 0xffccccccu, red = 0xff0000aau;
-    float cx = SPEEDO_X + SPEEDO_W * 0.5f;
-    float cy = SPEEDO_Y + SPEEDO_H - 1.0f;
-    float rad = SPEEDO_H - 2.0f;
+    /* put the position above the countdown, keeping only its ink */
+    for (int y = 0; y < POS_H; y++)
+        for (int x = 0; x < POS_W; x++) {
+            uint32_t c = glyph[y * POS_W + x];
+            if (c != bg) hud_pixel(img, POS_DX + x, POS_DY + y, c);
+        }
 
-    /* the arc, with a tick every 40 mph and the last third in red */
-    for (int a = 0; a <= 180; a += 3) {
+    const uint32_t white = 0xffccccccu, red = 0xff0000aau,
+                   grey  = 0xff888888u;
+    float cx = SPEEDO_X + SPEEDO_W * 0.5f;
+    float cy = SPEEDO_Y + SPEEDO_H - 3.0f;
+    float rad = SPEEDO_H - 8.0f;
+
+    for (int a = 0; a <= 180; a++) {
         float t = a * 3.14159265f / 180.0f;
-        int x = (int)(cx - cosf(t) * rad);
-        int y = (int)(cy - sinf(t) * rad);
-        hud_pixel(img, x, y, a > 120 ? red : white);
+        for (float k = 0; k < 3.0f; k += 1.0f) {
+            int x = (int)(cx - cosf(t) * (rad - k));
+            int y = (int)(cy - sinf(t) * (rad - k));
+            hud_pixel(img, x, y, a > 126 ? red : white);
+        }
     }
-    for (int k = 0; k <= 5; k++) {
-        float t = (k / 5.0f) * 3.14159265f;
-        for (float r = rad - 3; r <= rad; r += 1.0f)
+    for (int k = 0; k <= 8; k++) {
+        float t = (k / 8.0f) * 3.14159265f;
+        float len = (k % 2 == 0) ? 9.0f : 5.0f;
+        for (float r = rad - len; r <= rad - 3; r += 0.5f)
             hud_pixel(img, (int)(cx - cosf(t) * r),
-                      (int)(cy - sinf(t) * r), white);
+                      (int)(cy - sinf(t) * r), k % 2 ? grey : white);
     }
-    /* the needle */
     float t = (mph / 200.0f) * 3.14159265f;
-    for (float r = 0; r < rad - 1.0f; r += 0.5f) {
+    for (float r = 0; r < rad - 5.0f; r += 0.5f) {
         int x = (int)(cx - cosf(t) * r), y = (int)(cy - sinf(t) * r);
-        hud_pixel(img, x, y, red);
-        hud_pixel(img, x, y - 1, red);
+        for (int dx = -1; dx <= 1; dx++)
+            for (int dy = -1; dy <= 1; dy++)
+                hud_pixel(img, x + dx, y + dy, red);
     }
-    for (int dx = -1; dx <= 1; dx++)
-        for (int dy = -1; dy <= 1; dy++)
-            hud_pixel(img, (int)cx + dx, (int)cy + dy, white);
+    for (int dx = -3; dx <= 3; dx++)
+        for (int dy = -3; dy <= 3; dy++)
+            if (dx * dx + dy * dy <= 9)
+                hud_pixel(img, (int)cx + dx, (int)cy + dy, white);
+}
+
+/* The numbers go on in the front end's own type, over the dial, because
+ * a readable digit is more use than a period-correct one and the guest
+ * has no font that size. */
+static void hud_speedo_numbers(Rectangle game)
+{
+    if (!road_extras) return;
+    float sx = game.width / (float)GAME_W, sy = game.height / (float)GAME_H;
+    char buf[24];
+    snprintf(buf, sizeof buf, "%d", (int)(speedo_mph + 0.5f));
+    int fs = (int)(15 * sy);
+    if (fs < 14) fs = 14;
+    int w = ui_measure(buf, fs);
+    float cx = game.x + (SPEEDO_X + SPEEDO_W * 0.5f) * sx;
+    float cy = game.y + (SPEEDO_Y + SPEEDO_H - 2) * sy;
+    ui_text(buf, (int)(cx - w / 2), (int)(cy - fs * 1.05f), fs, RAYWHITE);
+    int us = fs * 2 / 3;
+    int uw = ui_measure("MPH", us);
+    ui_text("MPH", (int)(cx - uw / 2), (int)(cy - fs * 0.1f), us,
+            (Color){170, 170, 180, 255});
+    /* the ends of the scale, so the needle means something */
+    int ts = fs / 2 < 10 ? 10 : fs / 2;
+    ui_text("0", (int)(game.x + (SPEEDO_X + 2) * sx),
+            (int)(cy - ts), ts, (Color){150, 150, 155, 255});
+    int mw = ui_measure("200", ts);
+    ui_text("200", (int)(game.x + (SPEEDO_X + SPEEDO_W - 2) * sx - mw),
+            (int)(cy - ts), ts, (Color){150, 150, 155, 255});
 }
 
 /* ---- the course intro ------------------------------------------------
@@ -2562,7 +2634,8 @@ static void page_game(void)
         int mapping = 0;
         Rectangle mr = {0};
         course_read_live = 1;
-        if (!offline_mode && course_data_ready()) {
+        int racing_now = !offline_mode && course_data_ready();
+        if (racing_now) {
             float mw = bz.right.width - 16;
             mr = (Rectangle){bz.right.x + 8, bz.right.y + 8, mw, mw};
             mapping = 1;
@@ -2571,6 +2644,7 @@ static void page_game(void)
         if (bezel_panels(&bz, GetFPS(), native_overrides_count(), 1,
                          mpos(), mapping ? (int)mr.height + 14 : 0))
             game_debug_clicked = 1;
+        if (racing_now) hud_speedo_numbers(bz.game);
         if (mapping) draw_race_map(mr);
         course_read_live = 0;
         start_menu_draw(bz.game);
