@@ -1149,16 +1149,18 @@ static void hud_speedo(uint32_t *img)
  * A lever rather than a digit because you read it without looking, which
  * is the whole point of a gear indicator at 140 mph.
  */
-#define GEAR_X 74
-#define GEAR_Y 8
-#define GEAR_W 30
-#define GEAR_H 34
+#define GEAR_X 76
+#define GEAR_Y 12
+#define GEAR_W 22
+#define GEAR_H 24
 
 static void hud_gear(uint32_t *img)
 {
     if (!road_extras) return;
-    int gear = (int16_t)r16(A3 + 0x3054 + 0x28);
-    if (gear < 0) gear = 0;
+    /* The word counts from zero and the car starts in first, so first is
+     * what zero means -- there is no neutral to show. */
+    int gear = (int16_t)r16(A3 + 0x3054 + 0x28) + 1;
+    if (gear < 1) gear = 1;
     if (gear > 5) gear = 5;
 
     const uint32_t white = 0xffccccccu, grey = 0xff666666u,
@@ -1168,14 +1170,17 @@ static void hud_gear(uint32_t *img)
     /* the gate: three columns joined across the middle */
     int lx = GEAR_X + 3, mx = GEAR_X + GEAR_W / 2, rx = GEAR_X + GEAR_W - 3;
     int ty = GEAR_Y, by = GEAR_Y + GEAR_H - 2, my = (ty + by) / 2;
-    for (int y = ty; y <= by; y++) {
-        hud_pixel(img, lx, y, grey);
-        hud_pixel(img, mx, y, grey);
-        hud_pixel(img, rx, y, grey);
+    /* two pixels thick: at this size one is a thread */
+    for (int y = ty; y <= by; y++)
+        for (int k = 0; k < 2; k++) {
+            hud_pixel(img, lx + k, y, grey);
+            hud_pixel(img, mx + k, y, grey);
+            if (y <= my) hud_pixel(img, rx + k, y, grey);
+        }
+    for (int x = lx; x <= rx + 1; x++) {
+        hud_pixel(img, x, my, grey);
+        hud_pixel(img, x, my + 1, grey);
     }
-    for (int x = lx; x <= rx; x++) hud_pixel(img, x, my, grey);
-    /* fifth has no reverse below it on this gate */
-    for (int y = my; y <= by; y++) hud_pixel(img, rx, y, bg_row_dummy);
 
     int kx, ky;
     switch (gear) {
@@ -1183,15 +1188,25 @@ static void hud_gear(uint32_t *img)
     case 2:  kx = lx; ky = by - 3;      break;
     case 3:  kx = mx; ky = ty + 3;      break;
     case 4:  kx = mx; ky = by - 3;      break;
-    case 5:  kx = rx; ky = ty + 3;      break;
-    default: kx = mx; ky = my;          break;
+    default: kx = rx; ky = ty + 3;      break;   /* fifth */
     }
-    for (int dx = -2; dx <= 2; dx++)
-        for (int dy = -2; dy <= 2; dy++)
-            if (dx * dx + dy * dy <= 5)
-                hud_pixel(img, kx + dx, ky + dy, gear ? red : grey);
-    for (int dx = -1; dx <= 1; dx++)
-        hud_pixel(img, kx + dx, ky - 3, white);
+    /* a chunky knob on a short lever */
+    for (int dx = -3; dx <= 3; dx++)
+        for (int dy = -3; dy <= 3; dy++)
+            if (dx * dx + dy * dy <= 9) hud_pixel(img, kx + dx, ky + dy, red);
+    /* the lever runs from the knob back to the middle of the gate, the
+     * way it does in a car -- drawn away from it, it looked like a knob
+     * floating beside the gate rather than sitting in it */
+    {
+        int sx0 = kx, sy0 = ky, sx1 = mx, sy1 = my;
+        int steps = 12;
+        for (int i = 0; i <= steps; i++) {
+            int x = sx0 + (sx1 - sx0) * i / steps;
+            int y = sy0 + (sy1 - sy0) * i / steps;
+            hud_pixel(img, x, y, white);
+            hud_pixel(img, x + 1, y, white);
+        }
+    }
 }
 
 /* The numbers go on in the front end's own type, over the dial, because
@@ -1208,29 +1223,14 @@ static void hud_speedo_numbers(Rectangle game)
     int w = ui_measure(buf, fs);
     float cx = game.x + (SPEEDO_X + SPEEDO_W * 0.5f) * sx;
     float cy = game.y + (SPEEDO_Y + SPEEDO_H - 2) * sy;
-    ui_text(buf, (int)(cx - w / 2), (int)(cy - fs * 1.05f), fs, RAYWHITE);
-    int us = fs * 2 / 3;
+    /* inside the arc and clear of it: the dial's own ink is white, and a
+     * white number crossing a white arc is unreadable */
+    ui_text(buf, (int)(cx - w / 2), (int)(cy - fs * 1.45f), fs, RAYWHITE);
+    int us = fs / 2;
     int uw = ui_measure("MPH", us);
-    ui_text("MPH", (int)(cx - uw / 2), (int)(cy - fs * 0.1f), us,
-            (Color){170, 170, 180, 255});
-    /* the ends of the scale, so the needle means something */
-    int ts = fs / 2 < 10 ? 10 : fs / 2;
-    ui_text("0", (int)(game.x + (SPEEDO_X + 2) * sx),
-            (int)(cy - ts), ts, (Color){150, 150, 155, 255});
-    int mw = ui_measure("200", ts);
-    ui_text("200", (int)(game.x + (SPEEDO_X + SPEEDO_W - 2) * sx - mw),
-            (int)(cy - ts), ts, (Color){150, 150, 155, 255});
-    {   /* the gear, as a number under its lever */
-        int gear = (int16_t)r16(A3 + 0x3054 + 0x28);
-        if (gear < 0) gear = 0;
-        if (gear > 5) gear = 5;
-        char g[8];
-        snprintf(g, sizeof g, "%d", gear);
-        int gs = fs * 3 / 4;
-        int gw = ui_measure(g, gs);
-        ui_text(g, (int)(game.x + (GEAR_X + GEAR_W * 0.5f) * sx - gw / 2),
-                (int)(game.y + (GEAR_Y + GEAR_H) * sy), gs, RAYWHITE);
-    }
+    ui_text("MPH", (int)(cx - uw / 2), (int)(cy - fs * 0.55f), us,
+            (Color){190, 190, 200, 255});
+
 }
 
 /* ---- the course intro ------------------------------------------------
@@ -3025,7 +3025,13 @@ int main(int argc, char **argv)
     bezel_scaler = UP_NAME[up_mode];
     if (offline) { frozen = true; SetTargetFPS(50); }
     long draws = 0;
-    while (!WindowShouldClose() && !(!offline && amiga_stopped())) {
+    /* A capture run ends when it HAS its capture.  Something on this
+     * desktop asks the window to close about ten seconds in -- which is
+     * fine for a person, and made every screenshot past frame 500 come
+     * back missing, which is why several of these changes went in
+     * unseen. */
+    while ((shot_at >= 0 || !WindowShouldClose()) &&
+           !(!offline && amiga_stopped())) {
         /* --static freezes the game, so in shot mode only switch it on
          * once the run has reached the capture frame. */
         if (IsKeyPressed(KEY_P)) paused = !paused;
@@ -3165,6 +3171,9 @@ int main(int argc, char **argv)
                  * front of it -- so that one goes through and the next
                  * one asks. */
                 static int fires;
+                /* not in --shot mode: a capture must not be able to open
+                 * a menu and drive the game somewhere else */
+                if (!ui_input) fire = 0;
                 if (fire && !fire_was && !racing && ++fires > 1 && !start_menu)
                     start_menu = 1;
                 if (racing) fires = 0;
@@ -3272,6 +3281,10 @@ int main(int argc, char **argv)
         UnloadAudioStream(stream);
         CloseAudioDevice();
     }
+    fprintf(stderr, "lotus2_view: loop ended at frame %ld -- "
+            "WindowShouldClose=%d amiga_stopped=%d shot_at=%ld draws=%ld\n",
+            swiv_frame_no, (int)WindowShouldClose(),
+            offline ? -1 : (int)amiga_stopped(), shot_at, draws);
     UnloadTexture(screen);
     UnloadTexture(road_tex);
     UnloadTexture(gfx_tex);
