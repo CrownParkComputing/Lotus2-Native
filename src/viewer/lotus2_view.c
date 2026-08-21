@@ -998,6 +998,49 @@ static void render_road_frame(int segment)
     road_valid = 1;
 }
 
+/* ---- the course intro ------------------------------------------------
+ * The screen is a framed photograph on black, and the game zooms it up
+ * as a transition -- which is where the picture-in-a-picture comes from:
+ * for the length of the zoom there is a big copy behind the small one.
+ *
+ * Rather than try to remove something that is genuinely being drawn,
+ * this finds the photograph and shows THAT, filling the window.  The
+ * frame, the black surround and the doubling all go, because none of
+ * them are being displayed any more -- the picture is.
+ *
+ * Detected from the picture rather than from game state: a screen that
+ * is mostly black with one wide block of colour in the middle is this
+ * screen and nothing else in the game looks like it.
+ */
+static int intro_photo(Rectangle *src)
+{
+    int first = -1, last = -1, dark = 0;
+    for (int y = 0; y < GAME_H; y++) {
+        int lit = 0;
+        for (int x = 0; x < GAME_W; x++)
+            if ((framebuf[(GAME_OY + y) * SCREEN_W + GAME_OX + x] &
+                 0x00ffffffu)) lit++;
+        if (lit < 8) dark++;
+        if (lit > 120) { if (first < 0) first = y; last = y; }
+    }
+    if (first < 0 || last - first < 50) return 0;
+    if (dark < GAME_H / 3) return 0;          /* a race frame is not black */
+
+    int l = -1, r = -1;
+    for (int x = 0; x < GAME_W; x++) {
+        int lit = 0;
+        for (int y = first; y <= last; y++)
+            if ((framebuf[(GAME_OY + y) * SCREEN_W + GAME_OX + x] &
+                 0x00ffffffu)) lit++;
+        if (lit > (last - first) / 3) { if (l < 0) l = x; r = x; }
+    }
+    if (l < 0 || r - l < 80) return 0;
+    /* inside the frame, not on it */
+    *src = (Rectangle){GAME_OX + l + 2, GAME_OY + first + 2,
+                       (float)(r - l - 3), (float)(last - first - 3)};
+    return 1;
+}
+
 /* ---- car colour ------------------------------------------------------
  * The player's Esprit is drawn with two palette entries: $a00 for the
  * body and $600 for its shaded side.  Sampling the indices under the car
@@ -2306,6 +2349,13 @@ static void draw_game_picture(Rectangle dst)
     /* below the HUD band, so the speed bar keeps its own red */
     car_recolour(framebuf, SCREEN_W, SCREEN_H, GAME_OY + 34);
 
+    Rectangle photo;
+    if (road_extras && intro_photo(&photo)) {
+        SetTextureFilter(game_screen, TEXTURE_FILTER_BILINEAR);
+        DrawTexturePro(game_screen, photo, dst, (Vector2){0, 0}, 0.0f, WHITE);
+        return;
+    }
+
     if (up_mode == UP_SCALE3X) {
         scale3x(framebuf, SCREEN_W, GAME_OX, GAME_OY, GAME_W, GAME_H, up_buf);
         if (!up_tex.id) {
@@ -2335,39 +2385,82 @@ static void draw_game_picture(Rectangle dst)
  * would be worse than not having the menu at all.
  */
 static int start_menu;
-static Rectangle start_hit[COURSE_COUNT + 2];
+static int start_sel;          /* the highlighted entry */
 
-static void start_menu_draw(void)
+/* Driven with the stick, because that is what is in your hand when the
+ * game asks you to press fire.  The mouse still works; it is just not
+ * required, which it was, which was the problem. */
+static void start_menu_input(uint8_t stick)
+{
+    const int n = COURSE_COUNT + 2;
+    static uint8_t was;
+    uint8_t went = (uint8_t)(stick & ~was);
+    was = stick;
+
+    if ((went & 0x01) || IsKeyPressed(KEY_UP))    start_sel--;
+    if ((went & 0x02) || IsKeyPressed(KEY_DOWN))  start_sel++;
+    if (start_sel < 0) start_sel = n - 1;
+    if (start_sel >= n) start_sel = 0;
+
+    if ((went & 0x10) || IsKeyPressed(KEY_SPACE) || IsKeyPressed(KEY_ENTER)) {
+        if (start_sel < COURSE_COUNT)      sel_request = start_sel + 1;
+        else if (start_sel == COURSE_COUNT) sel_request = -1;
+        else sel_request = 1 + (int)(wx_rand() * COURSE_COUNT) % COURSE_COUNT;
+        start_menu = 0;
+    }
+}
+
+/* Drawn to look like the game's own screens rather than like a tool:
+ * the panel sits in the middle of the picture, black with a white rule
+ * and a red heading, and the selected line is a solid red bar with the
+ * text knocked out of it.  Those are the game's colours, taken from its
+ * own palette ($a00 red, $ccc white, $000 black), so it sits inside the
+ * picture instead of on top of it.
+ */
+static void start_menu_draw(Rectangle game)
 {
     if (!start_menu) return;
     const int n = COURSE_COUNT + 2;
-    const int bw = 260, bh = 44, pad = 10;
-    int rows = (n + 1) / 2;
-    int w = bw * 2 + pad * 3, h = rows * (bh + pad) + pad + 54;
-    int x0 = (WIN_W - w) / 2, y0 = (WIN_H - h) / 2;
+    /* raylib already owns the names RED and WHITE, as it owned PINK and
+     * GOLD before them */
+    const Color MRED   = { 170, 0, 0, 255 };
+    const Color MWHITE = { 204, 204, 204, 255 };
 
-    DrawRectangle(0, 0, WIN_W, WIN_H, (Color){0, 0, 0, 170});
-    DrawRectangle(x0, y0, w, h, (Color){18, 18, 26, 255});
-    DrawRectangleLinesEx((Rectangle){x0, y0, w, h}, 2,
-                         (Color){0, 225, 255, 255});
-    ui_text("WHICH COURSE?", x0 + pad + 4, y0 + 12, 28, LABEL);
+    float scale = game.height / 200.0f;      /* the game's own pixel size */
+    int lh = (int)(11 * scale);
+    int w  = (int)(150 * scale);
+    int h  = lh * (n + 2) + (int)(8 * scale);
+    int x0 = (int)(game.x + (game.width - w) / 2);
+    int y0 = (int)(game.y + (game.height - h) / 2);
+
+    DrawRectangle(x0, y0, w, h, (Color){0, 0, 0, 235});
+    DrawRectangleLinesEx((Rectangle){x0, y0, w, h}, (int)(2 * scale), MWHITE);
+
+    int fs = (int)(9 * scale);
+    if (fs < 10) fs = 10;
+    int tw = ui_measure("SELECT COURSE", fs);
+    ui_text("SELECT COURSE", x0 + (w - tw) / 2, y0 + (int)(6 * scale),
+            fs, MRED);
 
     for (int i = 0; i < n; i++) {
-        Rectangle b = {x0 + pad + (i % 2) * (bw + pad),
-                       y0 + 54 + (i / 2) * (bh + pad), bw, bh};
-        start_hit[i] = b;
         const char *label = i < COURSE_COUNT ? COURSES[i].name
-                          : (i == COURSE_COUNT ? "ALL, FROM THE START"
-                                               : "SHUFFLE");
-        if (button(b, label, 0)) {
-            if (i < COURSE_COUNT)            sel_request = i + 1;
-            else if (i == COURSE_COUNT)      sel_request = -1;
-            else                             sel_request =
-                1 + (int)(wx_rand() * COURSE_COUNT) % COURSE_COUNT;
+                          : (i == COURSE_COUNT ? "ALL COURSES" : "SHUFFLE");
+        int y = y0 + (int)(6 * scale) + lh * (i + 2);
+        Rectangle line = {x0 + (int)(4 * scale), y - 1,
+                          w - (int)(8 * scale), lh};
+        if (ui_hit(line)) start_sel = i;
+        if (i == start_sel)
+            DrawRectangleRec(line, MRED);
+        int lw = ui_measure(label, fs);
+        ui_text(label, x0 + (w - lw) / 2, y, fs,
+                i == start_sel ? MWHITE : (Color){136, 136, 136, 255});
+        if (i == start_sel && ui_pressed()) {
+            if (i < COURSE_COUNT) sel_request = i + 1;
+            else if (i == COURSE_COUNT) sel_request = -1;
+            else sel_request = 1 + (int)(wx_rand() * COURSE_COUNT) % COURSE_COUNT;
             start_menu = 0;
         }
     }
-    ui_text("ESC closes it", x0 + pad + 4, y0 + h - 26, 18, LIGHTGRAY);
 }
 
 /* Set by page_game when the panel's DEBUG button is clicked. */
@@ -2407,7 +2500,7 @@ static void page_game(void)
             game_debug_clicked = 1;
         if (mapping) draw_race_map(mr);
         course_read_live = 0;
-        start_menu_draw();
+        start_menu_draw(bz.game);
         return;
     }
     float s = (float)WIN_W / SCREEN_W;
@@ -2691,10 +2784,23 @@ int main(int argc, char **argv)
                  * is the accelerator and must go straight through */
                 static int fire_was;
                 int fire = (p1 & 0x10) != 0;
-                if (fire && !fire_was && !start_menu && !course_data_ready())
+                /* course_data_ready() goes through course_byte(), which
+                 * prefers the PREVIEW's snapshot when one is loaded --
+                 * so without this it always said "a race is up" and the
+                 * menu never appeared. */
+                course_read_live = 1;
+                int racing = course_data_ready();
+                course_read_live = 0;
+                /* The FIRST fire is the one that leaves the title, and
+                 * the menu belongs on the setup screen rather than in
+                 * front of it -- so that one goes through and the next
+                 * one asks. */
+                static int fires;
+                if (fire && !fire_was && !racing && ++fires > 1 && !start_menu)
                     start_menu = 1;
+                if (racing) fires = 0;
                 fire_was = fire;
-                if (start_menu) p1 = 0;
+                if (start_menu) { start_menu_input(p1); p1 = 0; }
                 p2 = keyboard_stick(false) | gamepad_stick(1);
                 if (p2 || js_present(1)) p2_present = 1;
             }
