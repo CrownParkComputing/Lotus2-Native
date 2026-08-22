@@ -2351,9 +2351,29 @@ static void draw_race_map(Rectangle r)
  * road's own edge stream at a higher resolution, rather than a filter
  * over the result).
  */
+/* One control for the whole look, rather than two that can disagree.
+ * ORIGINAL is the Amiga's picture with nothing added: no markings drawn
+ * on roads that never had them, no simulated weather, no depth fog or
+ * headlights, and no upscaler.  It is there so the port can be compared
+ * against what it is a port OF. */
+enum { LOOK_ORIGINAL, LOOK_ENHANCED, LOOK_SMOOTH, LOOK_COUNT };
+static const char *const LOOK_NAME[LOOK_COUNT] = {
+    "ORIGINAL", "ENHANCED", "SMOOTH"
+};
 enum { UP_SHARP, UP_SCALE3X, UP_SMOOTH, UP_COUNT };
 static const char *const UP_NAME[UP_COUNT] = { "SHARP", "SCALE3X", "SMOOTH" };
 static int up_mode = UP_SCALE3X;
+static int look_mode = LOOK_ENHANCED;
+
+static void look_apply(void)
+{
+    switch (look_mode) {
+    case LOOK_ORIGINAL: up_mode = UP_SHARP;   road_extras = 0; break;
+    case LOOK_SMOOTH:   up_mode = UP_SMOOTH;  road_extras = 1; break;
+    default:            up_mode = UP_SCALE3X; road_extras = 1; break;
+    }
+    bezel_scaler = LOOK_NAME[look_mode];
+}
 static uint32_t up_buf[GAME_W * 3 * GAME_H * 3];
 static Texture2D up_tex;
 
@@ -2633,7 +2653,7 @@ int main(int argc, char **argv)
     amiga_set_pc_hook(road_pc_hook);
     bool paused = false, frozen = false, freeze_on_course = false;
 
-    bezel_scaler = UP_NAME[up_mode];
+    look_apply();
     if (offline) { frozen = true; SetTargetFPS(50); }
     long draws = 0;
     /* A capture run ends when it HAS its capture.  Something on this
@@ -2653,11 +2673,10 @@ int main(int argc, char **argv)
         if (IsKeyPressed(KEY_TWO))   mode = MODE_COURSE;
         /* the series: when a course's replay has handed over and the
          * next one is asked for, it starts from the top of the boot */
-        if (IsKeyPressed(KEY_F4)) road_extras = !road_extras;
         if (IsKeyPressed(KEY_F6)) car_hue = (car_hue + 1) % CAR_HUE_COUNT;
         if (IsKeyPressed(KEY_F3)) {
-            up_mode = (up_mode + 1) % UP_COUNT;
-            bezel_scaler = UP_NAME[up_mode];
+            look_mode = (look_mode + 1) % LOOK_COUNT;
+            look_apply();
         }
         if (IsKeyPressed(KEY_THREE)) mode = MODE_GFX;
         if (IsKeyPressed(KEY_FOUR))  mode = MODE_SOUND;

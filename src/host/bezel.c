@@ -116,9 +116,11 @@ int bezel_panels(Bezel *b, int fps, int natives, int want_debug_btn,
         snprintf(fpsbuf, sizeof fpsbuf, "%d FPS", fps);
         snprintf(natbuf, sizeof natbuf, "%d ROUTINES NATIVE C", natives);
 
-        struct { const char *t; int head; Color c; } rows[26];
+        /* MARSH and STORM fell off the end when the passwords went in:
+         * the list had a cap and nothing said so. */
+        struct { const char *t; int head; Color c; } rows[40];
         int n = 0;
-        #define ROW(T, H, C) do { if (n < 26) { rows[n].t = (T); \
+        #define ROW(T, H, C) do { if (n < 40) { rows[n].t = (T); \
             rows[n].head = (H); rows[n].c = (C); n++; } } while (0)
         ROW("LOTUS TURBO CHALLENGE 2", 0, hue);
         ROW("NATIVE PROJECT", 0, BODYHUE);
@@ -150,7 +152,7 @@ int bezel_panels(Bezel *b, int fps, int natives, int want_debug_btn,
             ROW("X        COURSE PREVIEW", 0, hue);
             ROW("         (pad X too)", 0, BODYHUE);
             ROW("F11      FULLSCREEN", 0, BODYHUE);
-            snprintf(scalebuf, sizeof scalebuf, "F3       SCALER: %s",
+            snprintf(scalebuf, sizeof scalebuf, "F3       LOOK: %s",
                      bezel_scaler);
             ROW(scalebuf, 0, BODYHUE);
             ROW("P        PAUSE", 0, BODYHUE);
@@ -161,7 +163,10 @@ int bezel_panels(Bezel *b, int fps, int natives, int want_debug_btn,
              * a course and hunting for them on a bit of paper is worse
              * than any menu I could put in front of you.  FOREST is
              * where the game starts, so it has none. */
-            ROW("PASSWORDS", 0, HEADHUE);
+            ROW("COURSE PASSWORDS", 0, HEADHUE);
+            ROW("type on the game's", 0, BODYHUE);
+            ROW("PASSWORD screen", 0, BODYHUE);
+            ROW("", 0, BODYHUE);
             ROW("NIGHT     TWILIGHT", 0, BODYHUE);
             ROW("FOG       PEA SOUP", 0, BODYHUE);
             ROW("SNOW      THE SKIDS", 0, BODYHUE);
