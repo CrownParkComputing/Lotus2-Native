@@ -1034,205 +1034,6 @@ static int race_on_screen(void)
     return 0;
 }
 
-/* The HUD, measured off a race frame at 320x200:
- *
- *   "000 MPH"   x 2..64   y 2..10
- *   speed bar   x 2..50   y 13..25
- *   "1ST"       x 6..36   y 26..44
- *   score       x 254..318 y 2..10
- *   countdown   x 285..318 y 25..45
- *
- * The left third is three small things stacked; taking all of it gives
- * room for a dial worth reading.  The position moves up beside the
- * score, above the countdown, by COPYING the game's own glyphs rather
- * than by finding the value and drawing digits of our own -- the art is
- * already there and it is the game's.
- */
-#define SPEEDO_X 1
-#define SPEEDO_Y 4
-#define SPEEDO_W 68
-#define SPEEDO_H 42
-#define POS_SX 4
-#define POS_SY 26
-#define POS_W  36
-#define POS_H  19
-#define POS_DX 280
-#define POS_DY 8
-static float speedo_mph;          /* for the numbers, drawn in the panel */
-
-static void hud_pixel(uint32_t *img, int x, int y, uint32_t c)
-{
-    if (x >= 0 && x < GAME_W && y >= 0 && y < GAME_H)
-        img[(GAME_OY + y) * SCREEN_W + GAME_OX + x] = c;
-}
-static uint32_t hud_get(const uint32_t *img, int x, int y)
-{
-    if (x < 0 || x >= GAME_W || y < 0 || y >= GAME_H) return 0;
-    return img[(GAME_OY + y) * SCREEN_W + GAME_OX + x];
-}
-
-static void hud_speedo(uint32_t *img)
-{
-    if (!road_extras) return;
-    int word = (int16_t)r16(A3 + 0x3054 + 0x0e);
-    if (word < 0) word = 0;
-    float mph = word / 40.0f;
-    if (mph > 200.0f) mph = 200.0f;
-    speedo_mph = mph;
-
-    /* The band has the SKY behind it, and the sky is a gradient, so one
-     * sampled colour painted across the whole block reads as a slab laid
-     * over the picture.  Each row takes its own colour, from beyond
-     * everything being covered. */
-    #define HUD_CLEAR_TO 110
-    uint32_t bg = hud_get(img, HUD_CLEAR_TO + 6, SPEEDO_Y + 6);
-
-    /* lift the position glyphs before anything is painted over */
-    static uint32_t glyph[POS_W * POS_H];
-    for (int y = 0; y < POS_H; y++)
-        for (int x = 0; x < POS_W; x++)
-            glyph[y * POS_W + x] = hud_get(img, POS_SX + x, POS_SY + y);
-
-    for (int y = 0; y < SPEEDO_Y + SPEEDO_H; y++) {
-        uint32_t rowbg = hud_get(img, HUD_CLEAR_TO + 6, y);
-        for (int x = 0; x < HUD_CLEAR_TO; x++)
-            hud_pixel(img, x, y, rowbg);
-    }
-
-    /* put the position above the countdown, keeping only its ink */
-    for (int y = 0; y < POS_H; y++)
-        for (int x = 0; x < POS_W; x++) {
-            uint32_t c = glyph[y * POS_W + x];
-            if (c != bg) hud_pixel(img, POS_DX + x, POS_DY + y, c);
-        }
-
-    const uint32_t white = 0xffccccccu, red = 0xff0000aau,
-                   grey  = 0xff888888u;
-    float cx = SPEEDO_X + SPEEDO_W * 0.5f;
-    float cy = SPEEDO_Y + SPEEDO_H - 3.0f;
-    float rad = SPEEDO_H - 8.0f;
-
-    for (int a = 0; a <= 180; a++) {
-        float t = a * 3.14159265f / 180.0f;
-        for (float k = 0; k < 3.0f; k += 1.0f) {
-            int x = (int)(cx - cosf(t) * (rad - k));
-            int y = (int)(cy - sinf(t) * (rad - k));
-            hud_pixel(img, x, y, a > 126 ? red : white);
-        }
-    }
-    for (int k = 0; k <= 8; k++) {
-        float t = (k / 8.0f) * 3.14159265f;
-        float len = (k % 2 == 0) ? 9.0f : 5.0f;
-        for (float r = rad - len; r <= rad - 3; r += 0.5f)
-            hud_pixel(img, (int)(cx - cosf(t) * r),
-                      (int)(cy - sinf(t) * r), k % 2 ? grey : white);
-    }
-    float t = (mph / 200.0f) * 3.14159265f;
-    for (float r = 0; r < rad - 5.0f; r += 0.5f) {
-        int x = (int)(cx - cosf(t) * r), y = (int)(cy - sinf(t) * r);
-        for (int dx = -1; dx <= 1; dx++)
-            for (int dy = -1; dy <= 1; dy++)
-                hud_pixel(img, x + dx, y + dy, red);
-    }
-    for (int dx = -3; dx <= 3; dx++)
-        for (int dy = -3; dy <= 3; dy++)
-            if (dx * dx + dy * dy <= 9)
-                hud_pixel(img, (int)cx + dx, (int)cy + dy, white);
-}
-
-
-/* A gear lever beside the dial.  The gear is a word in the car block at
- * $3054(A3)+$28 -- the same one the drive harness prints -- and the
- * Esprit has FIVE, so the gate is the usual three columns: 1 and 2 on
- * the left, 3 and 4 in the middle, 5 up on the right.
- *
- * A lever rather than a digit because you read it without looking, which
- * is the whole point of a gear indicator at 140 mph.
- */
-#define GEAR_X 76
-#define GEAR_Y 12
-#define GEAR_W 22
-#define GEAR_H 24
-
-static void hud_gear(uint32_t *img)
-{
-    if (!road_extras) return;
-    /* The word counts from zero and the car starts in first, so first is
-     * what zero means -- there is no neutral to show. */
-    int gear = (int16_t)r16(A3 + 0x3054 + 0x28) + 1;
-    if (gear < 1) gear = 1;
-    if (gear > 5) gear = 5;
-
-    const uint32_t white = 0xffccccccu, grey = 0xff666666u,
-                   red = 0xff0000aau;
-    uint32_t bg_row_dummy = hud_get(img, GEAR_X + GEAR_W + 8, GEAR_Y + 4);
-    /* the speedo pass already cleared this band, row by row */
-    /* the gate: three columns joined across the middle */
-    int lx = GEAR_X + 3, mx = GEAR_X + GEAR_W / 2, rx = GEAR_X + GEAR_W - 3;
-    int ty = GEAR_Y, by = GEAR_Y + GEAR_H - 2, my = (ty + by) / 2;
-    /* two pixels thick: at this size one is a thread */
-    for (int y = ty; y <= by; y++)
-        for (int k = 0; k < 2; k++) {
-            hud_pixel(img, lx + k, y, grey);
-            hud_pixel(img, mx + k, y, grey);
-            if (y <= my) hud_pixel(img, rx + k, y, grey);
-        }
-    for (int x = lx; x <= rx + 1; x++) {
-        hud_pixel(img, x, my, grey);
-        hud_pixel(img, x, my + 1, grey);
-    }
-
-    int kx, ky;
-    switch (gear) {
-    case 1:  kx = lx; ky = ty + 3;      break;
-    case 2:  kx = lx; ky = by - 3;      break;
-    case 3:  kx = mx; ky = ty + 3;      break;
-    case 4:  kx = mx; ky = by - 3;      break;
-    default: kx = rx; ky = ty + 3;      break;   /* fifth */
-    }
-    /* a chunky knob on a short lever */
-    for (int dx = -3; dx <= 3; dx++)
-        for (int dy = -3; dy <= 3; dy++)
-            if (dx * dx + dy * dy <= 9) hud_pixel(img, kx + dx, ky + dy, red);
-    /* the lever runs from the knob back to the middle of the gate, the
-     * way it does in a car -- drawn away from it, it looked like a knob
-     * floating beside the gate rather than sitting in it */
-    {
-        int sx0 = kx, sy0 = ky, sx1 = mx, sy1 = my;
-        int steps = 12;
-        for (int i = 0; i <= steps; i++) {
-            int x = sx0 + (sx1 - sx0) * i / steps;
-            int y = sy0 + (sy1 - sy0) * i / steps;
-            hud_pixel(img, x, y, white);
-            hud_pixel(img, x + 1, y, white);
-        }
-    }
-}
-
-/* The numbers go on in the front end's own type, over the dial, because
- * a readable digit is more use than a period-correct one and the guest
- * has no font that size. */
-static void hud_speedo_numbers(Rectangle game)
-{
-    if (!road_extras) return;
-    float sx = game.width / (float)GAME_W, sy = game.height / (float)GAME_H;
-    char buf[24];
-    snprintf(buf, sizeof buf, "%d", (int)(speedo_mph + 0.5f));
-    int fs = (int)(15 * sy);
-    if (fs < 14) fs = 14;
-    int w = ui_measure(buf, fs);
-    float cx = game.x + (SPEEDO_X + SPEEDO_W * 0.5f) * sx;
-    float cy = game.y + (SPEEDO_Y + SPEEDO_H - 2) * sy;
-    /* inside the arc and clear of it: the dial's own ink is white, and a
-     * white number crossing a white arc is unreadable */
-    ui_text(buf, (int)(cx - w / 2), (int)(cy - fs * 1.45f), fs, RAYWHITE);
-    int us = fs / 2;
-    int uw = ui_measure("MPH", us);
-    ui_text("MPH", (int)(cx - uw / 2), (int)(cy - fs * 0.55f), us,
-            (Color){190, 190, 200, 255});
-
-}
-
 /* ---- the course intro ------------------------------------------------
  * The screen is a framed photograph on black, and the game zooms it up
  * as a transition -- which is where the picture-in-a-picture comes from:
@@ -1247,8 +1048,34 @@ static void hud_speedo_numbers(Rectangle game)
  * is mostly black with one wide block of colour in the middle is this
  * screen and nothing else in the game looks like it.
  */
+/* Which screen this is, settled from the chipset instead of from the
+ * picture.  The course intro is the only thing in the game that runs SIX
+ * bitplanes, and it runs them out of $7fedc: the title and the Gremlin
+ * screen use five on the same list, the race uses four on the other
+ * three.  Measured at frames 600, 800, 1000 and 3300.
+ *
+ * The pixel test that was here before described "a bright block on
+ * black", which the Gremlin logo also is -- so it was being blown up to
+ * fill the window too.  Twice.  A shape described loosely enough to
+ * catch two things will keep catching them; the plane count catches one.
+ */
+static int intro_screen(void)
+{
+    uint32_t at = amiga_get_coplc() & (CHIP_SIZE - 1);
+    if (at != 0x7fedc) return 0;
+    for (int i = 0; i < 4096; i++, at += 4) {
+        if (at + 3 >= CHIP_SIZE) break;
+        uint16_t reg = (uint16_t)((chip[at] << 8) | chip[at + 1]);
+        uint16_t dat = (uint16_t)((chip[at + 2] << 8) | chip[at + 3]);
+        if (reg == 0x0100) return ((dat >> 12) & 7) == 6;
+        if (reg == 0xffff && dat == 0xfffe) break;
+    }
+    return 0;
+}
+
 static int intro_photo(Rectangle *src)
 {
+    if (!intro_screen()) return 0;
     int first = -1, last = -1, dark = 0;
     for (int y = 0; y < GAME_H; y++) {
         int lit = 0;
@@ -2572,7 +2399,6 @@ static void draw_game_picture(Rectangle dst)
 {
     /* below the HUD band, so the speed bar keeps its own red */
     car_recolour(framebuf, SCREEN_W, SCREEN_H, GAME_OY + 34);
-    if (race_on_screen()) { hud_speedo(framebuf); hud_gear(framebuf); }
 
     Rectangle photo;
     if (road_extras && intro_photo(&photo)) {
@@ -2639,7 +2465,6 @@ static void page_game(void)
         if (bezel_panels(&bz, GetFPS(), native_overrides_count(), 1,
                          mpos(), mapping ? (int)mr.height + 14 : 0))
             game_debug_clicked = 1;
-        if (racing_now) hud_speedo_numbers(bz.game);
         if (mapping) draw_race_map(mr);
         course_read_live = 0;
         return;
